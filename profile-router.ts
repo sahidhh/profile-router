@@ -196,7 +196,7 @@ export default function (pi: ExtensionAPI) {
         if (approved === undefined) {
           approved = await ctx.ui.confirm(
             "Switch model?",
-            `Profile "${next.matched[0]?.name ?? "default"}" suggests ${resolved.provider}/${resolved.id} (current: ${current ? `${current.provider}/${current.id}` : "unknown"})`,
+            `Profile "${next.matched.map((m) => m.name).join("+") || "default"}" suggests ${resolved.provider}/${resolved.id} (current: ${current ? `${current.provider}/${current.id}` : "unknown"})`,
           );
           modelDecisions.set(key, approved);
         }
