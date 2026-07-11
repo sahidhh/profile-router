@@ -382,6 +382,7 @@ async function installExtension(dir: string) {
   const handlers: Record<string, (event: unknown, ctx: unknown) => unknown> = {};
   const commands: Record<string, { handler: (args: string, ctx: unknown) => unknown }> = {};
   const notifications: { msg: string; level: string }[] = [];
+  const setModelCalls: unknown[] = [];
 
   const fakePi = {
     on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
@@ -390,7 +391,10 @@ async function installExtension(dir: string) {
     registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => unknown }) => {
       commands[name] = opts;
     },
-    setModel: async () => true,
+    setModel: async (model: unknown) => {
+      setModelCalls.push(model);
+      return true;
+    },
     setThinkingLevel: () => {},
     setActiveTools: async () => {},
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
@@ -411,7 +415,7 @@ async function installExtension(dir: string) {
     model: undefined,
   };
 
-  return { handlers, commands, notifications, statuses, ctx };
+  return { handlers, commands, notifications, statuses, setModelCalls, ctx };
 }
 
 describe("F2 regression: stale /profile override never mislabels an auto-classified profile as manual", () => {
@@ -479,6 +483,62 @@ describe("F3 regression: unresolvable model warns exactly once per session", () 
       await handlers["before_agent_start"]!({ prompt: "trigger-kw again", systemPrompt: [] }, ctx);
       const secondWarnings = notifications.filter((n) => n.level === "warning" && n.msg.includes("does-not-exist"));
       assert.equal(secondWarnings.length, 0, "must not re-warn for the same model string in the same session");
+    });
+  });
+});
+
+describe("model fallback chain: array model resolves in order", () => {
+  test("first unresolvable candidate falls through to the second; no warning fires", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({
+            name: "chain-profile",
+            keywords: ["chain-kw"],
+            model: ["openrouter/not-credentialed", "anthropic/claude-sonnet-5"],
+          }),
+        ],
+      });
+
+      const { handlers, notifications, setModelCalls, ctx } = await installExtension(dir);
+      const sonnet = { id: "claude-sonnet-5", provider: "anthropic", name: "Sonnet" };
+      ctx.models.resolve = ((spec: string) =>
+        spec === "anthropic/claude-sonnet-5" ? sonnet : undefined) as never;
+
+      await handlers["before_agent_start"]!({ prompt: "chain-kw here", systemPrompt: [] }, ctx);
+
+      assert.deepEqual(setModelCalls, [sonnet], "must switch to the first resolvable candidate");
+      assert.equal(
+        notifications.filter((n) => n.level === "warning").length,
+        0,
+        "a chain with a resolvable fallback must not warn",
+      );
+    });
+  });
+
+  test("all candidates unresolvable warns exactly once, listing every candidate", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({
+            name: "dead-chain-profile",
+            keywords: ["dead-kw"],
+            model: ["openrouter/nope-a", "provider/nope-b"],
+          }),
+        ],
+      });
+
+      const { handlers, notifications, setModelCalls, ctx } = await installExtension(dir);
+
+      await handlers["before_agent_start"]!({ prompt: "dead-kw once", systemPrompt: [] }, ctx);
+      await handlers["before_agent_start"]!({ prompt: "dead-kw again", systemPrompt: [] }, ctx);
+
+      assert.equal(setModelCalls.length, 0);
+      const warnings = notifications.filter((n) => n.level === "warning");
+      assert.equal(warnings.length, 1, "must warn once per session for a dead chain");
+      assert.ok(warnings[0]!.msg.includes("dead-chain-profile"), "warning must name the profile");
+      assert.ok(warnings[0]!.msg.includes("openrouter/nope-a"), "warning must list the first candidate");
+      assert.ok(warnings[0]!.msg.includes("provider/nope-b"), "warning must list the second candidate");
     });
   });
 });

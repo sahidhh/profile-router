@@ -62,7 +62,8 @@ Steps:
       "skills": ["..."],           // informational — surfaced as a "Recommended Skills" hint block
       "tools": ["..."],            // active toolset when this profile (or the union of matches) is non-empty
       "disabledAgents": ["..."],   // subagent names to block via the `task` tool's `agent` param
-      "model": "provider/id",      // e.g. "anthropic/claude-sonnet-5" — resolved via ctx.models.resolve()
+      "model": "provider/id",      // or a fallback chain: ["openrouter/x", "anthropic/y"] — first spec
+                                   // that resolves against a credentialed provider wins (ctx.models.resolve())
       "thinkingLevel": "low|medium|high"
     }
   ]
@@ -79,7 +80,11 @@ mission's hard constraints):
   that needs an agent keeps it enabled for the whole merged set.
 - `model`, `thinkingLevel`: **single-value** — the highest-scoring matched
   profile wins; ties break on declaration order in `bundles.json` (earlier
-  wins). The shipped config declares the generic `lookup` profile **last**
+  wins). A `model` value may itself be a **fallback chain** (array of
+  specs); the winning profile's chain is walked in order and the first
+  spec that resolves against a credentialed provider is used. Only if
+  *every* spec in the chain fails to resolve does the one-time warning
+  fire and the session stay on the current model. The shipped config declares the generic `lookup` profile **last**
   specifically so a tie between `lookup` and any more specific profile
   (`premium`, `investigation`, `implementation`, ...) resolves to the
   specific profile — see `VERIFICATION-REPORT.md` "Post-audit fixes".
@@ -93,26 +98,34 @@ mission's hard constraints):
 one profile (`lookup`) that salvage didn't directly supply — see
 `DECISIONS.md` for why.
 
-| Profile | Salvage source | Model tier | Why |
+Every tier except `premium` ships an **OpenRouter-first fallback chain**:
+a cheaper OpenRouter-routed model as primary, with the previous model as
+fallback (used automatically when OpenRouter isn't credentialed).
+
+| Profile | Salvage source | Model chain (primary → fallback), thinking | Why |
 |---|---|---|---|
-| `lookup` | Synthesized: EP-Investigation's read-only tool policy + EKC's "retrieval, not judgment → cheap model" cost rule | Gemini 2.5 Flash-Lite (cheap instruct-class), low thinking | Lightweight search/find/explain/summarise; LSP/AST-first exploration; tools restricted to `read`/`grep`/`glob`/`lsp`/`ast_grep`; subagents disabled |
-| `architecture` | EP-Architecture | Sonnet, high thinking | Heavy/thinking profile for system design — decides, doesn't build |
-| `implementation` | EP-Implementation | Sonnet, medium thinking | Build against a settled plan |
-| `review` | EP-Review | Sonnet, high thinking | Multi-pass audit; findings only, no edits |
-| `investigation` | EP-Investigation | Sonnet, medium thinking | Root-cause debugging; read-only |
-| `premium` | EP-Premium | Opus, high thinking | Schema/secrets/migrations — the T1 safety-floor profile |
-| `hotfix` | EP-FastCheap | DeepSeek V4 Flash (cheap), low thinking | Reversible UI fixes under time pressure; guardrails still apply |
+| `lookup` | Synthesized: EP-Investigation's read-only tool policy + EKC's "retrieval, not judgment → cheap model" cost rule | `openrouter/google/gemini-2.5-flash-lite` → `google/gemini-2.5-flash-lite`, low | Lightweight search/find/explain/summarise; LSP/AST-first exploration; tools restricted to `read`/`grep`/`glob`/`lsp`/`ast_grep`; subagents disabled |
+| `architecture` | EP-Architecture | `openrouter/deepseek/deepseek-v4-pro` → `anthropic/claude-sonnet-5`, high | Heavy/thinking profile for system design — decides, doesn't build |
+| `implementation` | EP-Implementation | `openrouter/minimax/minimax-m3` → `anthropic/claude-sonnet-5`, medium | Build against a settled plan |
+| `review` | EP-Review | `openrouter/deepseek/deepseek-v4-pro` → `anthropic/claude-sonnet-5`, high | Multi-pass audit; findings only, no edits |
+| `investigation` | EP-Investigation | `openrouter/minimax/minimax-m3` → `anthropic/claude-sonnet-5`, medium | Root-cause debugging; read-only |
+| `premium` | EP-Premium | `anthropic/claude-opus-4-8` (no cheap primary — deliberate), high | Schema/secrets/migrations — the T1 safety-floor profile |
+| `hotfix` | EP-FastCheap | `openrouter/deepseek/deepseek-v4-flash` → `deepseek/deepseek-v4-flash`, low | Reversible UI fixes under time pressure; guardrails still apply |
+
+`premium` is the one tier deliberately left on Opus with no cheaper
+primary: it fires on schema, secrets, migrations, and destructive git
+operations, where the cost of a wrong answer dwarfs token spend. If you
+want it cheaper anyway, it's a one-line change to a chain like
+`["openrouter/deepseek/deepseek-v4-pro", "anthropic/claude-opus-4-8"]`.
 
 ### Cheap-tier models: not just Claude variants
 
-The judgment tiers (`architecture`/`review`/`premium`/…) stay on
-Anthropic models, but the token-efficient tiers (`lookup`, `hotfix`) are
-"retrieval/mechanical work, not judgment" — any competent cheap
-instruct-class model does the job. The shipped config routes `lookup` to
-`google/gemini-2.5-flash-lite` and `hotfix` to `deepseek/deepseek-v4-flash`.
-All of the following strings are **verified against the installed
+Token-efficient work ("retrieval/mechanical work, not judgment") doesn't
+need Anthropic models — any competent cheap instruct-class model does the
+job, and the fallback-chain mechanism makes trying one risk-free. All of
+the following strings are **verified against the installed
 `@oh-my-pi/pi-catalog` `models.json`** (v16.4.1) and are drop-in
-replacements for a cheap profile's `model` field:
+candidates for any profile's `model` chain:
 
 | Family | `bundles.json` string | Resolves via |
 |---|---|---|
@@ -131,10 +144,13 @@ Notes:
 - `ctx.models.resolve()` only matches **credentialed** providers. Strings
   in `provider/id` form fall back to raw-id matching, so
   `google/gemini-2.5-flash-lite` resolves through OpenRouter even without
-  a Google key (OpenRouter ids are themselves `vendor/model` shaped).
-- Picking a model the user has no credentials for is safe: the extension
-  warns once and continues on the current model — it never silently
-  degrades or crashes (see §6).
+  a Google key (OpenRouter ids are themselves `vendor/model` shaped). To
+  *force* OpenRouter routing, prefix explicitly:
+  `openrouter/google/gemini-2.5-flash-lite`.
+- Picking a model the user has no credentials for is safe: the chain
+  falls through to the next candidate, and only a fully-dead chain warns
+  (once) and continues on the current model — never a silent degrade or
+  a crash (see §6).
 - Keep judgment work (schema, security, architecture verdicts) on the
   premium tiers; the cheap tier is for retrieval, summarisation, and
   small reversible edits.

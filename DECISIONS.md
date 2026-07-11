@@ -249,3 +249,19 @@ here. Ordered roughly by the phase in which it arose.
     exceeded by a new profile. Collision-checked against every other
     profile's keywords and the reachability prompt fixture; a dedicated
     reachability test for the new vocabulary was added.
+
+23. **Model fallback chains + OpenRouter-first routing on every tier
+    except `premium`** (follow-up to #19, requested by the maintainer:
+    "cheaper models via openrouter … keep current as fallback").
+    `Profile.model` widened to `string | string[]`; the extension walks
+    the winning profile's chain in order and uses the first spec
+    `ctx.models.resolve()` can match, warning (once) only when the whole
+    chain is dead. Shipped chains: architecture/review →
+    `openrouter/deepseek/deepseek-v4-pro`, implementation/investigation/
+    default → `openrouter/minimax/minimax-m3`, hotfix →
+    `openrouter/deepseek/deepseek-v4-flash`, lookup →
+    `openrouter/google/gemini-2.5-flash-lite`, each with the previous
+    model as fallback. `premium` deliberately keeps Opus with no cheap
+    primary: it fires on schema/secrets/migrations/destructive-git,
+    where a wrong answer costs more than any token budget — flagged in
+    `MANUAL.md` as a one-line change for operators who disagree.

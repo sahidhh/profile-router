@@ -30,20 +30,23 @@ prompt ──► classify (keywords, no LLM) ──► merge matched profiles �
 
 ## The shipped profiles
 
-Cheap tiers run on non-Anthropic instruct-class models; judgment tiers stay
-on Sonnet/Opus. All model strings are verified against the installed
-catalog (see `MANUAL.md` §2 for drop-in alternates: DeepSeek, Gemini 2.5,
-MiniMax M3, IBM Granite micro, Qwen instruct, Trinity preview).
+Every tier except `premium` runs an **OpenRouter-first fallback chain**: a
+cheap OpenRouter-routed primary, with the previous model as fallback (used
+automatically when OpenRouter isn't credentialed — a profile's `model` may
+be an array; the first spec that resolves wins). All model strings are
+verified against the installed catalog (see `MANUAL.md` §2 for drop-in
+alternates: DeepSeek, Gemini 2.5, MiniMax M3, IBM Granite micro, Qwen
+instruct, Trinity preview).
 
-| Profile | Triggers on | Model | Thinking | Tools | Character |
+| Profile | Triggers on | Model (primary → fallback) | Thinking | Tools | Character |
 |---|---|---|---|---|---|
-| `lookup` | find / where is / explain / summarize / overview | `google/gemini-2.5-flash-lite` | low | read, grep, glob, lsp, ast_grep | Retrieval + summarisation, read-only, subagents blocked |
-| `hotfix` | hotfix / quick fix / urgent fix | `deepseek/deepseek-v4-flash` | low | read, edit, bash | Reversible fixes under time pressure; guardrails never lowered |
-| `investigation` | root cause / debug / trace / reproduce | Sonnet | medium | + lsp, ast_grep, bash | Read-only root-causing; symptom patches rejected |
-| `implementation` | implement / build feature / write code | Sonnet | medium | full write set + lsp, ast_grep | Build against a settled plan |
-| `architecture` | design / redesign / cross-cutting | Sonnet | high | read-only + lsp, ast_grep | Decides system shape; does not implement |
-| `review` | review / audit / pre-merge | Sonnet | high | read-only + lsp, ast_grep | Findings only, no edits, max 2 fix cycles |
-| `premium` | schema / migration / secret / credential | Opus | high | full set + lsp, ast_grep | Safety floor — guardrails never lowered |
+| `lookup` | find / where is / explain / summarize / overview | `openrouter/google/gemini-2.5-flash-lite` → `google/gemini-2.5-flash-lite` | low | read, grep, glob, lsp, ast_grep | Retrieval + summarisation, read-only, subagents blocked |
+| `hotfix` | hotfix / quick fix / urgent fix | `openrouter/deepseek/deepseek-v4-flash` → `deepseek/deepseek-v4-flash` | low | read, edit, bash | Reversible fixes under time pressure; guardrails never lowered |
+| `investigation` | root cause / debug / trace / reproduce | `openrouter/minimax/minimax-m3` → Sonnet | medium | + lsp, ast_grep, bash | Read-only root-causing; symptom patches rejected |
+| `implementation` | implement / build feature / write code | `openrouter/minimax/minimax-m3` → Sonnet | medium | full write set + lsp, ast_grep | Build against a settled plan |
+| `architecture` | design / redesign / cross-cutting | `openrouter/deepseek/deepseek-v4-pro` → Sonnet | high | read-only + lsp, ast_grep | Decides system shape; does not implement |
+| `review` | review / audit / pre-merge | `openrouter/deepseek/deepseek-v4-pro` → Sonnet | high | read-only + lsp, ast_grep | Findings only, no edits, max 2 fix cycles |
+| `premium` | schema / migration / secret / credential | Opus (no cheap primary — deliberate safety floor) | high | full set + lsp, ast_grep | Safety floor — guardrails never lowered |
 
 Multiple profiles can match one prompt: `rules`/`skills`/`tools` union,
 `disabledAgents` intersect (safety-conservative), `model`/`thinkingLevel`

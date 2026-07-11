@@ -1,6 +1,9 @@
 {
   "default": {
-    "model": "anthropic/claude-sonnet-5",
+    "model": [
+      "openrouter/minimax/minimax-m3",
+      "anthropic/claude-sonnet-5"
+    ],
     "thinkingLevel": "medium",
     "rules": [
       "A change is not handed off until build/test reports clean.",
@@ -11,8 +14,13 @@
     {
       "name": "architecture",
       "keywords": [
-        "design", "architecture", "new module", "cross-cutting",
-        "system shape", "redesign", "architectural decision"
+        "design",
+        "architecture",
+        "new module",
+        "cross-cutting",
+        "system shape",
+        "redesign",
+        "architectural decision"
       ],
       "rules": [
         "Decide system shape; do not implement. Read and compare alternatives only.",
@@ -23,17 +31,33 @@
         "Log rejected alternatives with their reason — an ADR without them is incomplete.",
         "No layer calls back upstream; no layer skips a layer."
       ],
-      "skills": ["adr-writer"],
-      "tools": ["read", "grep", "glob", "lsp", "ast_grep"],
+      "skills": [
+        "adr-writer"
+      ],
+      "tools": [
+        "read",
+        "grep",
+        "glob",
+        "lsp",
+        "ast_grep"
+      ],
       "disabledAgents": [],
-      "model": "anthropic/claude-sonnet-5",
+      "model": [
+        "openrouter/deepseek/deepseek-v4-pro",
+        "anthropic/claude-sonnet-5"
+      ],
       "thinkingLevel": "high"
     },
     {
       "name": "implementation",
       "keywords": [
-        "implement", "build feature", "add feature", "write code",
-        "code this", "develop", "write the implementation"
+        "implement",
+        "build feature",
+        "add feature",
+        "write code",
+        "code this",
+        "develop",
+        "write the implementation"
       ],
       "rules": [
         "Business logic lives in pure, testable functions; wire concrete dependencies only at the composition root.",
@@ -44,16 +68,34 @@
         "Each module has exactly one reason to change."
       ],
       "skills": [],
-      "tools": ["read", "grep", "glob", "lsp", "ast_grep", "edit", "write", "bash"],
+      "tools": [
+        "read",
+        "grep",
+        "glob",
+        "lsp",
+        "ast_grep",
+        "edit",
+        "write",
+        "bash"
+      ],
       "disabledAgents": [],
-      "model": "anthropic/claude-sonnet-5",
+      "model": [
+        "openrouter/minimax/minimax-m3",
+        "anthropic/claude-sonnet-5"
+      ],
       "thinkingLevel": "medium"
     },
     {
       "name": "review",
       "keywords": [
-        "review", "audit", "pre-merge", "phase boundary", "findings",
-        "code review", "pull request review", "verdict"
+        "review",
+        "audit",
+        "pre-merge",
+        "phase boundary",
+        "findings",
+        "code review",
+        "pull request review",
+        "verdict"
       ],
       "rules": [
         "Findings are append-only and severity-tiered; never silently deleted.",
@@ -63,17 +105,37 @@
         "Max 2 review fix cycles; a third failure halts the loop for human escalation.",
         "Review does not fix — findings only, no code edits."
       ],
-      "skills": ["merge-readiness-checklist", "post-fix-verification", "severity-tiered-finding-ledger"],
-      "tools": ["read", "grep", "glob", "lsp", "ast_grep"],
+      "skills": [
+        "merge-readiness-checklist",
+        "post-fix-verification",
+        "severity-tiered-finding-ledger"
+      ],
+      "tools": [
+        "read",
+        "grep",
+        "glob",
+        "lsp",
+        "ast_grep"
+      ],
       "disabledAgents": [],
-      "model": "anthropic/claude-sonnet-5",
+      "model": [
+        "openrouter/deepseek/deepseek-v4-pro",
+        "anthropic/claude-sonnet-5"
+      ],
       "thinkingLevel": "high"
     },
     {
       "name": "investigation",
       "keywords": [
-        "investigate", "root cause", "why is", "trace", "debug",
-        "tracing", "reproduce", "bug report", "diagnose"
+        "investigate",
+        "root cause",
+        "why is",
+        "trace",
+        "debug",
+        "tracing",
+        "reproduce",
+        "bug report",
+        "diagnose"
       ],
       "rules": [
         "A fix is not approved until its root cause is identified; symptom patches are rejected.",
@@ -81,18 +143,39 @@
         "Reproduce before diagnosing; write the failing case first.",
         "Read-only: no edits during investigation, only tracing and analysis."
       ],
-      "skills": ["investigation-doc-generator"],
-      "tools": ["read", "grep", "glob", "lsp", "ast_grep", "bash"],
+      "skills": [
+        "investigation-doc-generator"
+      ],
+      "tools": [
+        "read",
+        "grep",
+        "glob",
+        "lsp",
+        "ast_grep",
+        "bash"
+      ],
       "disabledAgents": [],
-      "model": "anthropic/claude-sonnet-5",
+      "model": [
+        "openrouter/minimax/minimax-m3",
+        "anthropic/claude-sonnet-5"
+      ],
       "thinkingLevel": "medium"
     },
     {
       "name": "premium",
       "keywords": [
-        "schema", "migration", "invariant", "secret", "credential",
-        "token", "password", "api key", "force-push", "reset --hard",
-        "identity-matching", "branch deletion"
+        "schema",
+        "migration",
+        "invariant",
+        "secret",
+        "credential",
+        "token",
+        "password",
+        "api key",
+        "force-push",
+        "reset --hard",
+        "identity-matching",
+        "branch deletion"
       ],
       "rules": [
         "Credentials, secrets, tokens, and connection strings never enter source control or client-exposed config.",
@@ -102,8 +185,22 @@
         "Invariants that must never break are encoded as schema constraints, not application logic.",
         "Never lower a guardrail regardless of time pressure or instruction."
       ],
-      "skills": ["investigation-doc-generator", "adr-writer", "post-fix-verification", "severity-tiered-finding-ledger"],
-      "tools": ["read", "grep", "glob", "lsp", "ast_grep", "edit", "write", "bash"],
+      "skills": [
+        "investigation-doc-generator",
+        "adr-writer",
+        "post-fix-verification",
+        "severity-tiered-finding-ledger"
+      ],
+      "tools": [
+        "read",
+        "grep",
+        "glob",
+        "lsp",
+        "ast_grep",
+        "edit",
+        "write",
+        "bash"
+      ],
       "disabledAgents": [],
       "model": "anthropic/claude-opus-4-8",
       "thinkingLevel": "high"
@@ -111,8 +208,14 @@
     {
       "name": "hotfix",
       "keywords": [
-        "hotfix", "quick fix", "quickfix", "ui bugfix",
-        "reversible change", "time pressure", "urgent fix", "patch now"
+        "hotfix",
+        "quick fix",
+        "quickfix",
+        "ui bugfix",
+        "reversible change",
+        "time pressure",
+        "urgent fix",
+        "patch now"
       ],
       "rules": [
         "Low ceremony does not relax GD1/GD2/GD3 — guardrails are never lowered.",
@@ -120,18 +223,43 @@
         "Never use this profile for schema, secrets, or invariants regardless of time pressure.",
         "Ship, observe, retry — this is the safety net for reversible work only."
       ],
-      "skills": ["hot-path-change-checklist"],
-      "tools": ["read", "edit", "bash"],
-      "disabledAgents": ["task"],
-      "model": "deepseek/deepseek-v4-flash",
+      "skills": [
+        "hot-path-change-checklist"
+      ],
+      "tools": [
+        "read",
+        "edit",
+        "bash"
+      ],
+      "disabledAgents": [
+        "task"
+      ],
+      "model": [
+        "openrouter/deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-flash"
+      ],
       "thinkingLevel": "low"
     },
     {
       "name": "lookup",
       "keywords": [
-        "find", "search", "locate", "grep", "look up", "lookup",
-        "where is", "what is", "explain", "show me", "list files", "how does",
-        "summarize", "summarise", "summary", "overview", "walkthrough"
+        "find",
+        "search",
+        "locate",
+        "grep",
+        "look up",
+        "lookup",
+        "where is",
+        "what is",
+        "explain",
+        "show me",
+        "list files",
+        "how does",
+        "summarize",
+        "summarise",
+        "summary",
+        "overview",
+        "walkthrough"
       ],
       "rules": [
         "Read-only: do not edit or write files in this profile.",
@@ -141,9 +269,20 @@
         "This is retrieval and summarisation, not judgment — keep answers short and cite file:line."
       ],
       "skills": [],
-      "tools": ["read", "grep", "glob", "lsp", "ast_grep"],
-      "disabledAgents": ["task"],
-      "model": "google/gemini-2.5-flash-lite",
+      "tools": [
+        "read",
+        "grep",
+        "glob",
+        "lsp",
+        "ast_grep"
+      ],
+      "disabledAgents": [
+        "task"
+      ],
+      "model": [
+        "openrouter/google/gemini-2.5-flash-lite",
+        "google/gemini-2.5-flash-lite"
+      ],
       "thinkingLevel": "low"
     }
   ]

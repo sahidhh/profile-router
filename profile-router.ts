@@ -29,7 +29,7 @@ export interface Profile {
   skills?: string[];           // union
   tools?: string[];            // union
   disabledAgents?: string[];   // INTERSECTION across matched profiles
-  model?: string;              // single-value: highest score wins
+  model?: string | string[];   // single-value: highest score wins; array = fallback chain, first resolvable wins
   thinkingLevel?: string;      // single-value: highest score wins
 }
 
@@ -44,7 +44,7 @@ export interface MergedConfig {
   skills: string[];
   tools: string[];
   disabledAgents: string[];
-  model?: string;
+  model?: string | string[];
   thinkingLevel?: string;
 }
 
@@ -212,33 +212,47 @@ export default function (pi: ExtensionAPI) {
     );
 
     // ---- Model routing: suggest + confirm, only on actual change ----
+    // `model` may be a fallback chain (["openrouter/...", "anthropic/..."]) —
+    // the first spec that resolves against a credentialed provider wins.
     if (next.model) {
-      const resolved = ctx.models.resolve(next.model);
-      const current = ctx.model;
-      const changed = resolved && (!current || resolved.id !== current.id || resolved.provider !== current.provider);
-      if (resolved && changed) {
-        const key = `${current ? `${current.provider}/${current.id}` : "?"}→${resolved.provider}/${resolved.id}`;
-        let approved = modelDecisions.get(key);
-        if (approved === undefined) {
-          approved = await ctx.ui.confirm(
-            "Switch model?",
-            `Profile "${next.matched.map((m) => m.name).join("+") || "default"}" suggests ${resolved.provider}/${resolved.id} (current: ${current ? `${current.provider}/${current.id}` : "unknown"})`,
-          );
-          modelDecisions.set(key, approved);
+      const candidates = Array.isArray(next.model) ? next.model : [next.model];
+      let resolved: ReturnType<typeof ctx.models.resolve>;
+      let resolvedSpec: string | undefined;
+      for (const spec of candidates) {
+        resolved = ctx.models.resolve(spec);
+        if (resolved) {
+          resolvedSpec = spec;
+          break;
         }
-        if (approved) {
-          const ok = await pi.setModel(resolved);
-          if (!ok) {
-            ctx.ui.notify(`No credentials available for ${resolved.provider}/${resolved.id} — run /model ${next.model} manually`, "warning");
+      }
+      const current = ctx.model;
+      if (resolved) {
+        const changed = !current || resolved.id !== current.id || resolved.provider !== current.provider;
+        if (changed) {
+          const key = `${current ? `${current.provider}/${current.id}` : "?"}→${resolved.provider}/${resolved.id}`;
+          let approved = modelDecisions.get(key);
+          if (approved === undefined) {
+            approved = await ctx.ui.confirm(
+              "Switch model?",
+              `Profile "${next.matched.map((m) => m.name).join("+") || "default"}" suggests ${resolved.provider}/${resolved.id} (current: ${current ? `${current.provider}/${current.id}` : "unknown"})`,
+            );
+            modelDecisions.set(key, approved);
+          }
+          if (approved) {
+            const ok = await pi.setModel(resolved);
+            if (!ok) {
+              ctx.ui.notify(`No credentials available for ${resolved.provider}/${resolved.id} — run /model ${resolvedSpec} manually`, "warning");
+            }
           }
         }
-      } else if (!resolved) {
-        if (!unresolvedModelWarned.has(next.model)) {
-          unresolvedModelWarned.add(next.model);
+      } else {
+        const warnKey = candidates.join(", ");
+        if (!unresolvedModelWarned.has(warnKey)) {
+          unresolvedModelWarned.add(warnKey);
           const profileNames = next.matched.map((m) => m.name).join("+") || "default";
-          ctx.ui.notify(`Profile "${profileNames}" references model "${next.model}" which could not be resolved — continuing with the current model`, "warning");
+          ctx.ui.notify(`Profile "${profileNames}" references model${candidates.length > 1 ? "s" : ""} "${warnKey}" — none could be resolved, continuing with the current model`, "warning");
         }
-        debugLog("model not resolvable", { model: next.model });
+        debugLog("model not resolvable", { model: warnKey });
       }
     }
 
@@ -307,7 +321,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(
         active
           ? `Active: ${active.matched.map((m) => `${m.name}(${m.score})`).join(", ") || "default"}\n` +
-              `Model: ${active.model ?? "unset"} | Thinking: ${active.thinkingLevel ?? "unset"} | Disabled agents: ${active.disabledAgents.join(", ") || "none"}`
+              `Model: ${active.model ? (Array.isArray(active.model) ? active.model.join(" → ") : active.model) : "unset"} | Thinking: ${active.thinkingLevel ?? "unset"} | Disabled agents: ${active.disabledAgents.join(", ") || "none"}`
           : "No classification yet — send a prompt first",
         "info",
       );
