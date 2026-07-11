@@ -15,7 +15,7 @@
  * All API usage below is verified against the installed @oh-my-pi/pi-coding-agent
  * source/types (v16.4.1) — see API-FINDINGS.md for file:line evidence.
  */
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -24,11 +24,14 @@ import * as os from "node:os";
 
 export interface Profile {
   name: string;
-  keywords: string[];          // classifier terms
+  keywords: string[];          // classifier terms. Empty = a "class" build: never auto-matched, only reachable via /equip (manual override).
   rules?: string[];            // injected into system prompt
   skills?: string[];           // union
   tools?: string[];            // union
   disabledAgents?: string[];   // INTERSECTION across matched profiles
+  disabledTools?: string[];    // UNION across matched profiles (restrictive: any matched profile blocking a tool wins) — the Sentinel oath
+  maxMinions?: number;         // cap on live `task` subagents (MIN across matched profiles) — the Monarch summon cap
+  noConfirm?: boolean;         // auto-accept model switches without a confirm dialog (OR across matched) — the Berserker flag
   model?: string;              // single-value: highest score wins
   thinkingLevel?: string;      // single-value: highest score wins
 }
@@ -44,6 +47,9 @@ export interface MergedConfig {
   skills: string[];
   tools: string[];
   disabledAgents: string[];
+  disabledTools: string[];
+  maxMinions?: number;
+  noConfirm: boolean;
   model?: string;
   thinkingLevel?: string;
 }
@@ -75,6 +81,19 @@ export function loadBundles(cwd: string, notify?: (msg: string) => void): Bundle
     }
   }
   return { profiles: [] };
+}
+
+/**
+ * Resolve which bundles.json path is authoritative for WRITES (e.g. /arise persistence).
+ * Mirrors loadBundles' read precedence: an existing project-local file wins, else an
+ * existing global file, else the project-local path (so a first write creates it there).
+ */
+export function resolveBundlesPath(cwd: string): string {
+  const project = path.join(cwd, ".omp", "bundles.json");
+  const global = path.join(os.homedir(), ".omp", "bundles.json");
+  if (fs.existsSync(project)) return project;
+  if (fs.existsSync(global)) return global;
+  return project;
 }
 
 // ---------- Classification (keyword scoring, word-boundary matching) ----------
@@ -122,11 +141,16 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
     skills: [],
     tools: [],
     disabledAgents: [],
+    disabledTools: [],
+    noConfirm: false,
   };
 
   const union = (target: string[], src?: string[]) => {
     for (const item of src ?? []) if (!target.includes(item)) target.push(item);
   };
+  // maxMinions merges as MIN: the most restrictive summon cap among matched profiles wins.
+  const tightenCap = (current: number | undefined, next: number | undefined) =>
+    next === undefined ? current : current === undefined ? next : Math.min(current, next);
 
   if (matches.length === 0) {
     // Fallback to default profile when nothing matched.
@@ -134,7 +158,10 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
       union(cfg.rules, bundles.default.rules);
       union(cfg.skills, bundles.default.skills);
       union(cfg.tools, bundles.default.tools);
+      union(cfg.disabledTools, bundles.default.disabledTools);
       cfg.disabledAgents = bundles.default.disabledAgents ?? [];
+      cfg.maxMinions = bundles.default.maxMinions;
+      cfg.noConfirm = bundles.default.noConfirm ?? false;
     }
     cfg.model = bundles.default?.model;
     cfg.thinkingLevel = bundles.default?.thinkingLevel;
@@ -148,6 +175,11 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
     union(cfg.rules, profile.rules);
     union(cfg.skills, profile.skills);
     union(cfg.tools, profile.tools);
+    // disabledTools: UNION — opposite of disabledAgents. A block is a safety oath;
+    // a co-matched permissive profile must never be able to dilute it.
+    union(cfg.disabledTools, profile.disabledTools);
+    cfg.maxMinions = tightenCap(cfg.maxMinions, profile.maxMinions);
+    if (profile.noConfirm) cfg.noConfirm = true;
     const d = new Set(profile.disabledAgents ?? []);
     if (disabled === null) {
       disabled = d;
@@ -169,9 +201,13 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
 
 export default function (pi: ExtensionAPI) {
   let active: MergedConfig | null = null;
-  let manualOverride: string | null = null;        // set via /profile <name>
+  let manualOverride: string | null = null;        // set via /profile | /equip <name>
   const modelDecisions = new Map<string, boolean>(); // "from→to" -> user's answer, for this session
   const unresolvedModelWarned = new Set<string>();   // model strings already warned about this session
+  const poisonedProviders = new Set<string>();       // providers whose credential got soft-disabled → running on fallback
+  let liveSummons = 0;                               // in-flight `task` subagents this gate (Monarch summon cap)
+  const gatesCleared = new Map<string, number>();    // Hunter Rank: prompts routed, per class/profile label
+  let bossesFought = 0;                              // Hunter Rank: high/max-thinking gates entered
 
   const debugLog = (msg: string, context?: Record<string, unknown>) => {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
@@ -201,6 +237,14 @@ export default function (pi: ExtensionAPI) {
     const next = merge(matches, bundles);
     active = next;
 
+    // A new gate: the previous gate's summons are dismissed. Reset before enforcing the cap.
+    liveSummons = 0;
+
+    // Hunter Rank (in-session, flavor): tally which class/profile cleared this gate.
+    const rankLabel = next.matched.map((m) => m.name).join("+") || "default";
+    gatesCleared.set(rankLabel, (gatesCleared.get(rankLabel) ?? 0) + 1);
+    if (next.thinkingLevel === "high" || next.thinkingLevel === "xhigh" || next.thinkingLevel === "max") bossesFought += 1;
+
     debugLog("classified", { prompt: event.prompt.slice(0, 80), matched: next.matched });
 
     // Status line: ALWAYS visible so misclassification is caught before damage.
@@ -220,10 +264,16 @@ export default function (pi: ExtensionAPI) {
         const key = `${current ? `${current.provider}/${current.id}` : "?"}→${resolved.provider}/${resolved.id}`;
         let approved = modelDecisions.get(key);
         if (approved === undefined) {
-          approved = await ctx.ui.confirm(
-            "Switch model?",
-            `Profile "${next.matched.map((m) => m.name).join("+") || "default"}" suggests ${resolved.provider}/${resolved.id} (current: ${current ? `${current.provider}/${current.id}` : "unknown"})`,
-          );
+          if (next.noConfirm) {
+            // Berserker: asks nothing, confirms nothing. Auto-accept the switch.
+            approved = true;
+            ctx.ui.notify(`⚔ Berserker: switching to ${resolved.provider}/${resolved.id} without confirmation`, "info");
+          } else {
+            approved = await ctx.ui.confirm(
+              "Switch model?",
+              `Profile "${next.matched.map((m) => m.name).join("+") || "default"}" suggests ${resolved.provider}/${resolved.id} (current: ${current ? `${current.provider}/${current.id}` : "unknown"})`,
+            );
+          }
           modelDecisions.set(key, approved);
         }
         if (approved) {
@@ -271,44 +321,177 @@ export default function (pi: ExtensionAPI) {
     // Silent when profile unchanged and no rules — zero UI noise.
   });
 
-  // ---- Enforce disabledAgents ----
+  // ---- Enforce disabledTools (Sentinel oath), disabledAgents, and the Monarch summon cap ----
   pi.on("tool_call", async (event) => {
-    if (!active || active.disabledAgents.length === 0) return;
+    if (!active) return;
+    const label = active.matched.map((m) => m.name).join("+") || "default";
+
+    // Sentinel: a blocked tool is a hard oath — the class physically cannot invoke it.
+    if (active.disabledTools.includes(event.toolName)) {
+      return { block: true, reason: `Tool "${event.toolName}" is forbidden by the ${label} oath (disabledTools)` };
+    }
+
     if (event.toolName !== "task") return;
+
+    // disabledAgents: any matched profile that leaves an agent enabled keeps it enabled (intersection, computed in merge()).
     const target = String((event.input as Record<string, unknown>)?.agent ?? "task");
     if (active.disabledAgents.includes(target)) {
+      return { block: true, reason: `Agent "${target}" disabled by profile ${label}` };
+    }
+
+    // Monarch summon cap: block the (maxMinions+1)-th live summon.
+    if (active.maxMinions !== undefined && liveSummons >= active.maxMinions) {
       return {
         block: true,
-        reason: `Agent "${target}" disabled by profile ${active.matched.map((m) => m.name).join("+") || "default"}`,
+        reason: `Your army is at its limit, Monarch — ${liveSummons}/${active.maxMinions} summons already live. Wait for one to return.`,
       };
     }
+    // Reserve a slot the moment the summon is approved (before execution), so a burst of
+    // task calls in one turn can't all read a stale count of 0. Released on execution end;
+    // hard-reset each gate in before_agent_start so a lost end-event can't leak permanently.
+    liveSummons += 1;
   });
 
-  // ---- Manual override + status ----
+  // ---- Release a summon slot when a `task` subagent finishes (Monarch) ----
+  pi.on("tool_execution_end", async (event) => {
+    if (event.toolName === "task" && liveSummons > 0) liveSummons -= 1;
+  });
+
+  // ---- 🔥 Embers: re-inject active oaths into the compaction summary so guardrails survive it ----
+  // The dungeon eats memory; without this, the rules injected per-gate silently vanish on compaction.
+  pi.on("session.compacting", async (_event, ctx) => {
+    if (!active || active.rules.length === 0) return;
+    const label = active.matched.map((m) => m.name).join("+") || "default";
+    ctx.ui.notify("🔥 Ember restored — oaths carried through compaction", "info");
+    return {
+      context: [
+        `Active engineering rules (${label}) — these MUST remain in force after compaction:`,
+        ...active.rules.map((r) => `- ${r}`),
+      ],
+    };
+  });
+
+  // ---- 🩸 Poison: surface silent provider fallback so you never unknowingly run on the backup ----
+  pi.on("credential_disabled", async (event, ctx) => {
+    poisonedProviders.add(event.provider);
+    ctx.ui.setStatus("poison", `☠ fallback: ${[...poisonedProviders].join(", ")} disabled`);
+    ctx.ui.notify(
+      `☠ Poisoned — credential for "${event.provider}" was disabled; you are now on a fallback model. Cause: ${event.disabledCause}`,
+      "warning",
+    );
+  });
+
+  // ---- Manual override (pin/clear), shared by /profile and its flavored alias /equip ----
+  const setOverride = (arg: string, ctx: ExtensionCommandContext, verb: string): void => {
+    if (arg === "clear") {
+      manualOverride = null;
+      ctx.ui.notify(`${verb} cleared — auto-classification resumed`, "info");
+      return;
+    }
+    if (arg) {
+      const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+      if (!bundles.profiles.some((p) => p.name === arg)) {
+        ctx.ui.notify(`No profile named "${arg}" in bundles.json. Known: ${bundles.profiles.map((p) => p.name).join(", ") || "(none loaded)"}`, "error");
+        return;
+      }
+      manualOverride = arg;
+      ctx.ui.notify(`${verb} "${arg}" until cleared`, "info");
+      return;
+    }
+    ctx.ui.notify(
+      active
+        ? `Active: ${active.matched.map((m) => `${m.name}(${m.score})`).join(", ") || "default"}\n` +
+            `Model: ${active.model ?? "unset"} | Thinking: ${active.thinkingLevel ?? "unset"} | ` +
+            `Disabled agents: ${active.disabledAgents.join(", ") || "none"} | Blocked tools: ${active.disabledTools.join(", ") || "none"} | ` +
+            `Summon cap: ${active.maxMinions ?? "∞"}`
+        : "No classification yet — send a prompt first",
+      "info",
+    );
+  };
+
   pi.registerCommand("profile", {
     description: "Show active profile, or override: /profile <name> | /profile clear",
+    handler: async (args, ctx) => setOverride((args ?? "").trim(), ctx, "Profile pinned to"),
+  });
+
+  // /equip <class> — flavored alias for the same manual-override machinery (classes are keyword-less profiles).
+  pi.registerCommand("equip", {
+    description: "Equip a class build (Wretch/Vanguard/Archmage/Monarch/Sentinel/Berserker …): /equip <name> | /equip clear",
+    handler: async (args, ctx) => setOverride((args ?? "").trim(), ctx, "Equipped"),
+  });
+
+  // ---- 🗡 /arise — Shadow Extraction: distill ONE battle-learned rule, approve, persist ----
+  pi.registerCommand("arise", {
+    description: "Shadow Extraction: /arise (ask the model to distill one rule) | /arise <profile> <rule text> (persist it)",
     handler: async (args, ctx) => {
-      const arg = (args ?? "").trim();
-      if (arg === "clear") {
-        manualOverride = null;
-        ctx.ui.notify("Profile override cleared — auto-classification resumed", "info");
+      const trimmed = (args ?? "").trim();
+      if (!trimmed) {
+        pi.sendUserMessage(
+          "Distill exactly ONE reusable engineering rule from the work in this session — a single imperative sentence of the kind that belongs in a profile's rules list. Output only that one sentence, nothing else.",
+          { deliverAs: "followUp" },
+        );
+        ctx.ui.notify('🗡 ARISE — asking the current model to distill one shadow. Then persist it with: /arise <profile> <that rule>', "info");
         return;
       }
-      if (arg) {
-        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
-        if (!bundles.profiles.some((p) => p.name === arg)) {
-          ctx.ui.notify(`No profile named "${arg}" in bundles.json. Known: ${bundles.profiles.map((p) => p.name).join(", ") || "(none loaded)"}`, "error");
-          return;
-        }
-        manualOverride = arg;
-        ctx.ui.notify(`Profile pinned to "${arg}" until /profile clear`, "info");
+      const sp = trimmed.search(/\s/);
+      if (sp < 0) {
+        ctx.ui.notify('Usage: /arise <profile> <rule text> — e.g. /arise implementation "Prefer the framework\'s native facility over a custom abstraction."', "error");
         return;
       }
+      const profileName = trimmed.slice(0, sp);
+      const rule = trimmed.slice(sp + 1).trim().replace(/^["']|["']$/g, "");
+      if (!rule) {
+        ctx.ui.notify("No rule text provided after the profile name.", "error");
+        return;
+      }
+      const bundlesPath = resolveBundlesPath(ctx.cwd);
+      let parsed: Bundles;
+      try {
+        parsed = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+      } catch (err) {
+        ctx.ui.notify(`Cannot read ${bundlesPath}: ${(err as Error).message}`, "error");
+        return;
+      }
+      const profile = parsed.profiles?.find((p) => p.name === profileName);
+      if (!profile) {
+        ctx.ui.notify(`No profile named "${profileName}" in ${bundlesPath}. Known: ${(parsed.profiles ?? []).map((p) => p.name).join(", ") || "(none)"}`, "error");
+        return;
+      }
+      if ((profile.rules ?? []).includes(rule)) {
+        ctx.ui.notify(`That shadow is already bound to "${profileName}" — nothing to extract.`, "info");
+        return;
+      }
+      const approved = await ctx.ui.confirm(
+        `ARISE — extract into "${profileName}"?`,
+        `Append this rule to ${profileName}.rules in ${bundlesPath}:\n\n"${rule}"`,
+      );
+      if (!approved) {
+        ctx.ui.notify("Shadow released — no change written.", "info");
+        return;
+      }
+      profile.rules = [...(profile.rules ?? []), rule];
+      try {
+        fs.writeFileSync(bundlesPath, JSON.stringify(parsed, null, 2) + "\n", "utf-8");
+      } catch (err) {
+        ctx.ui.notify(`Failed to write ${bundlesPath}: ${(err as Error).message}`, "error");
+        return;
+      }
+      ctx.ui.notify(`🗡 Shadow extracted — "${profileName}" now carries ${profile.rules.length} rules. It takes effect on the next gate of that class.`, "info");
+    },
+  });
+
+  // ---- 🏆 /rank — Hunter Rank card (in-session, flavor; resets when the session restarts) ----
+  pi.registerCommand("rank", {
+    description: "Show your Hunter Rank card for this session (gates cleared per class, bosses fought)",
+    handler: async (_args, ctx) => {
+      const gates = [...gatesCleared.entries()].sort((a, b) => b[1] - a[1]);
+      const total = gates.reduce((n, [, c]) => n + c, 0);
+      const rankName = total >= 20 ? "S" : total >= 10 ? "A" : total >= 5 ? "B" : total >= 2 ? "C" : total >= 1 ? "D" : "E";
+      const breakdown = gates.map(([name, c]) => `  ${name}: ${c}`).join("\n") || "  (no gates cleared yet)";
       ctx.ui.notify(
-        active
-          ? `Active: ${active.matched.map((m) => `${m.name}(${m.score})`).join(", ") || "default"}\n` +
-              `Model: ${active.model ?? "unset"} | Thinking: ${active.thinkingLevel ?? "unset"} | Disabled agents: ${active.disabledAgents.join(", ") || "none"}`
-          : "No classification yet — send a prompt first",
+        `🏆 Hunter Rank ${rankName} — ${total} gate${total === 1 ? "" : "s"} cleared, ${bossesFought} boss${bossesFought === 1 ? "" : "es"} fought` +
+          (poisonedProviders.size ? `, ☠ poisoned (${[...poisonedProviders].join(", ")})` : "") +
+          `\n${breakdown}`,
         "info",
       );
     },

@@ -140,6 +140,90 @@
       "disabledAgents": ["task"],
       "model": "anthropic/claude-haiku-4-5-20251001",
       "thinkingLevel": "low"
+    },
+
+    {
+      "name": "wretch",
+      "keywords": [],
+      "rules": [
+        "SL1 run: clear the gate with the least possible spend; do not reach for heavier tools or a bigger model."
+      ],
+      "skills": [],
+      "tools": ["read", "grep", "glob"],
+      "disabledAgents": ["task"],
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "thinkingLevel": "low"
+    },
+    {
+      "name": "vanguard",
+      "keywords": [],
+      "rules": [
+        "Daily-driver implementation: a change is not handed off until build/test reports clean.",
+        "Prefer the framework's native facility over a custom abstraction."
+      ],
+      "skills": [],
+      "tools": ["read", "grep", "glob", "edit", "write", "bash"],
+      "disabledAgents": ["task"],
+      "model": "anthropic/claude-sonnet-5",
+      "thinkingLevel": "medium"
+    },
+    {
+      "name": "archmage",
+      "keywords": [],
+      "rules": [
+        "Boss-fight class: decide system shape deliberately; read and compare alternatives before committing.",
+        "Log rejected alternatives with their reason — an ADR without them is incomplete.",
+        "The Archmage delegates to no one — no subagents; solve it in one cast."
+      ],
+      "skills": ["adr-writer"],
+      "tools": ["read", "grep", "glob", "edit", "write", "bash"],
+      "disabledAgents": ["task"],
+      "model": "anthropic/claude-opus-4-8",
+      "thinkingLevel": "high"
+    },
+    {
+      "name": "monarch",
+      "keywords": [],
+      "rules": [
+        "Command, do not work: delegate substantive work to `task` subagents; keep your own direct edits minimal.",
+        "The summon cap is a hard limit — at most 3 minions may be live at once."
+      ],
+      "skills": [],
+      "tools": ["read", "grep", "glob", "task"],
+      "disabledAgents": [],
+      "maxMinions": 3,
+      "model": "anthropic/claude-sonnet-5",
+      "thinkingLevel": "low"
+    },
+    {
+      "name": "sentinel",
+      "keywords": [],
+      "rules": [
+        "Sworn to judge, forbidden to touch: report findings only — never edit, write, or run mutating commands.",
+        "Findings are append-only and severity-tiered; never silently deleted.",
+        "Review categories are fixed: Security / Performance / Architecture / DB / Async / Tests / Hygiene / API Design.",
+        "Merge-readiness gate: build clean, tests pass, forbidden-pattern grep clean, no unresolved Critical/High finding."
+      ],
+      "skills": ["merge-readiness-checklist", "severity-tiered-finding-ledger"],
+      "tools": ["read", "grep", "glob"],
+      "disabledAgents": [],
+      "disabledTools": ["edit", "write", "bash"],
+      "model": "anthropic/claude-sonnet-5",
+      "thinkingLevel": "high"
+    },
+    {
+      "name": "berserker",
+      "keywords": [],
+      "rules": [
+        "Unattended autonomy: proceed without stopping to confirm model switches; keep moving.",
+        "Guardrails are never lowered regardless of autonomy — noConfirm skips dialogs, not oaths."
+      ],
+      "skills": [],
+      "tools": ["read", "grep", "glob", "edit", "write", "bash"],
+      "disabledAgents": [],
+      "noConfirm": true,
+      "model": "anthropic/claude-sonnet-5",
+      "thinkingLevel": "medium"
     }
   ]
 }

@@ -201,6 +201,56 @@ describe("merge", () => {
     assert.deepEqual(cfg.rules, ["gamma-rule"]);
     assert.equal(cfg.model, "anthropic/claude-sonnet-5");
   });
+
+  test("disabledTools: UNION across matches — any profile blocking a tool wins (opposite of disabledAgents)", () => {
+    const b: Bundles = {
+      profiles: [
+        profile({ name: "s1", keywords: ["oath-kw"], disabledTools: ["write", "edit"] }),
+        profile({ name: "s2", keywords: ["oath-kw"], disabledTools: ["bash"] }),
+        profile({ name: "s3", keywords: ["oath-kw"] }), // declares no disabledTools; must NOT dilute the oath
+      ],
+    };
+    const cfg = merge(classify("oath-kw", b), b);
+    assert.deepEqual(cfg.disabledTools.sort(), ["bash", "edit", "write"].sort());
+  });
+
+  test("maxMinions: MIN across matches — the tightest summon cap wins; undefined leaves it uncapped", () => {
+    const b: Bundles = {
+      profiles: [
+        profile({ name: "m1", keywords: ["cap-kw"], maxMinions: 5 }),
+        profile({ name: "m2", keywords: ["cap-kw"], maxMinions: 2 }),
+        profile({ name: "m3", keywords: ["cap-kw"] }), // no cap declared -> ignored, doesn't loosen
+      ],
+    };
+    assert.equal(merge(classify("cap-kw", b), b).maxMinions, 2);
+
+    const uncapped: Bundles = { profiles: [profile({ name: "u", keywords: ["u-kw"] })] };
+    assert.equal(merge(classify("u-kw", uncapped), uncapped).maxMinions, undefined);
+  });
+
+  test("noConfirm: OR across matches — any Berserker-flagged profile flips it on", () => {
+    const b: Bundles = {
+      profiles: [
+        profile({ name: "n1", keywords: ["berserk-kw"] }),
+        profile({ name: "n2", keywords: ["berserk-kw"], noConfirm: true }),
+      ],
+    };
+    assert.equal(merge(classify("berserk-kw", b), b).noConfirm, true);
+
+    const calm: Bundles = { profiles: [profile({ name: "c", keywords: ["calm-kw"] })] };
+    assert.equal(merge(classify("calm-kw", calm), calm).noConfirm, false);
+  });
+
+  test("default fallback carries disabledTools / maxMinions / noConfirm when nothing matches", () => {
+    const b: Bundles = {
+      default: { disabledTools: ["write"], maxMinions: 1, noConfirm: true },
+      profiles: [profile({ name: "x", keywords: ["x-kw"] })],
+    };
+    const cfg = merge([], b);
+    assert.deepEqual(cfg.disabledTools, ["write"]);
+    assert.equal(cfg.maxMinions, 1);
+    assert.equal(cfg.noConfirm, true);
+  });
 });
 
 // ---------- loadBundles() ----------
@@ -279,9 +329,12 @@ describe("bundles.json reachability", () => {
     hotfix: "we need a quick fix hotfix for this UI bugfix under time pressure",
   };
 
-  test("bundles.json declares exactly the 7 expected profiles", () => {
+  // Class builds (ARSENAL): keyword-less profiles reachable only via /equip, never auto-classified.
+  const classNames = ["wretch", "vanguard", "archmage", "monarch", "sentinel", "berserker"];
+
+  test("bundles.json declares the 7 task profiles plus the 6 class builds", () => {
     const names = realBundles.profiles.map((p) => p.name).sort();
-    assert.deepEqual(names, Object.keys(reachabilityPrompts).sort());
+    assert.deepEqual(names, [...Object.keys(reachabilityPrompts), ...classNames].sort());
   });
 
   for (const [name, promptText] of Object.entries(reachabilityPrompts)) {
@@ -296,10 +349,39 @@ describe("bundles.json reachability", () => {
     });
   }
 
-  test("no profile has an empty keyword list", () => {
+  test("every task profile has keywords; every class build has none", () => {
     for (const p of realBundles.profiles) {
-      assert.ok(p.keywords.length > 0, `profile "${p.name}" has no keywords`);
+      if (classNames.includes(p.name)) {
+        assert.equal(p.keywords.length, 0, `class build "${p.name}" must be keyword-less (equip-only)`);
+      } else {
+        assert.ok(p.keywords.length > 0, `task profile "${p.name}" has no keywords`);
+      }
     }
+  });
+
+  test("class builds are never auto-classified (keyword-less), only equippable", () => {
+    // A prompt echoing every class name must not surface any class via classify().
+    const hits = classify(`wretch vanguard archmage monarch sentinel berserker ${classNames.join(" ")}`, realBundles);
+    for (const h of hits) {
+      assert.ok(!classNames.includes(h.profile.name), `class "${h.profile.name}" must not auto-match`);
+    }
+    // But each is reachable as a manual override (single infinite-score match), as /equip does.
+    for (const name of classNames) {
+      const p = realBundles.profiles.find((x) => x.name === name)!;
+      const cfg = merge([{ profile: p, score: Number.POSITIVE_INFINITY }], realBundles);
+      assert.equal(cfg.matched[0]?.name, name);
+    }
+  });
+
+  test("sentinel build blocks mutating tools; monarch caps summons at 3", () => {
+    const sentinel = realBundles.profiles.find((p) => p.name === "sentinel")!;
+    const scfg = merge([{ profile: sentinel, score: Number.POSITIVE_INFINITY }], realBundles);
+    assert.deepEqual(scfg.disabledTools.sort(), ["bash", "edit", "write"].sort());
+    const monarch = realBundles.profiles.find((p) => p.name === "monarch")!;
+    const mcfg = merge([{ profile: monarch, score: Number.POSITIVE_INFINITY }], realBundles);
+    assert.equal(mcfg.maxMinions, 3);
+    assert.ok(mcfg.tools.includes("task"), "monarch must keep the task tool active to summon");
+    assert.ok(!mcfg.disabledAgents.includes("task"), "monarch must leave subagents enabled");
   });
 
   test("default fallback model resolves when nothing matches", () => {
@@ -357,22 +439,35 @@ function writeBundles(dir: string, bundles: Bundles) {
 }
 
 /** Installs the extension against a fake ExtensionAPI and returns its handlers + a fake ctx bound to `dir`. */
-async function installExtension(dir: string) {
+async function installExtension(
+  dir: string,
+  opts: {
+    resolve?: (model: string) => { id: string; provider: string } | undefined;
+    confirm?: () => Promise<boolean>;
+    currentModel?: { id: string; provider: string };
+  } = {},
+) {
   const mod = await import("../profile-router.ts");
   const handlers: Record<string, (event: unknown, ctx: unknown) => unknown> = {};
   const commands: Record<string, { handler: (args: string, ctx: unknown) => unknown }> = {};
   const notifications: { msg: string; level: string }[] = [];
+  const sentMessages: { content: unknown; options: unknown }[] = [];
+  const setModelCalls: unknown[] = [];
 
   const fakePi = {
     on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
       handlers[event] = handler;
     },
-    registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => unknown }) => {
-      commands[name] = opts;
+    registerCommand: (name: string, opts2: { handler: (args: string, ctx: unknown) => unknown }) => {
+      commands[name] = opts2;
     },
-    setModel: async () => true,
+    setModel: async (m: unknown) => {
+      setModelCalls.push(m);
+      return true;
+    },
     setThinkingLevel: () => {},
     setActiveTools: async () => {},
+    sendUserMessage: (content: unknown, options: unknown) => sentMessages.push({ content, options }),
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
   };
   await mod.default(fakePi as never);
@@ -382,16 +477,16 @@ async function installExtension(dir: string) {
     cwd: dir,
     ui: {
       notify: (msg: string, level: string) => notifications.push({ msg, level }),
-      confirm: async () => true,
+      confirm: opts.confirm ?? (async () => true),
       setStatus: (key: string, value: string) => {
         statuses[key] = value;
       },
     },
-    models: { resolve: (_model: string) => undefined },
-    model: undefined,
+    models: { resolve: opts.resolve ?? ((_model: string) => undefined) },
+    model: opts.currentModel,
   };
 
-  return { handlers, commands, notifications, statuses, ctx };
+  return { handlers, commands, notifications, statuses, sentMessages, setModelCalls, ctx };
 }
 
 describe("F2 regression: stale /profile override never mislabels an auto-classified profile as manual", () => {
@@ -493,5 +588,139 @@ describe("classify: intra-profile keyword overlap dedup", () => {
     const review = hits.find((h) => h.profile.name === "review");
     assert.ok(review, "review profile should still match");
     assert.equal(review?.score, 1, "code review should no longer double-count against bare review");
+  });
+});
+
+// ---------- ARSENAL mechanics (handler-level) ----------
+
+describe("🔥 Embers: compaction re-injects active oaths", () => {
+  test("session.compacting returns the active profile's rules as summary context and notifies", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "guarded", keywords: ["guard-kw"], rules: ["Never lower a guardrail."] })] });
+      const { handlers, notifications, ctx } = await installExtension(dir);
+
+      // No active config yet -> nothing to restore.
+      const before = (await handlers["session.compacting"]!({ type: "session.compacting" }, ctx)) as { context?: string[] } | void;
+      assert.equal(before, undefined);
+
+      // Classify a gate so rules become active, then compact.
+      await handlers["before_agent_start"]!({ prompt: "guard-kw please", systemPrompt: [] }, ctx);
+      notifications.length = 0;
+      const result = (await handlers["session.compacting"]!({ type: "session.compacting" }, ctx)) as { context?: string[] };
+      assert.ok(result?.context?.some((line) => line.includes("Never lower a guardrail.")), "active oath must survive compaction");
+      assert.ok(notifications.some((n) => n.msg.includes("Ember restored")), "must notify that the ember was restored");
+    });
+  });
+});
+
+describe("🩸 Poison: silent provider fallback is surfaced", () => {
+  test("credential_disabled sets a persistent status marker and warns", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "any", keywords: ["k"] })] });
+      const { handlers, notifications, statuses, ctx } = await installExtension(dir);
+      await handlers["credential_disabled"]!({ type: "credential_disabled", provider: "anthropic", disabledCause: "invalid_grant" }, ctx);
+      assert.ok(statuses["poison"]?.includes("anthropic"), "poison status must name the downed provider");
+      assert.ok(
+        notifications.some((n) => n.level === "warning" && n.msg.includes("anthropic") && n.msg.includes("invalid_grant")),
+        "must warn with provider + cause",
+      );
+    });
+  });
+});
+
+describe("⚖ Sentinel: disabledTools is a hard block", () => {
+  test("a blocked tool call is rejected once the sentinel build is equipped", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "sentinel", keywords: [], tools: ["read"], disabledTools: ["edit", "write"] })],
+      });
+      const { handlers, commands, ctx } = await installExtension(dir);
+      await commands["equip"]!.handler("sentinel", ctx);
+      await handlers["before_agent_start"]!({ prompt: "review this", systemPrompt: [] }, ctx);
+
+      const edit = (await handlers["tool_call"]!({ toolName: "edit", input: {} }, ctx)) as { block?: boolean } | void;
+      assert.equal(edit?.block, true, "edit must be blocked by the sentinel oath");
+      const read = (await handlers["tool_call"]!({ toolName: "read", input: {} }, ctx)) as { block?: boolean } | void;
+      assert.equal(read ?? undefined, undefined, "read must pass through");
+    });
+  });
+});
+
+describe("👑 Monarch: summon cap blocks the (maxMinions+1)-th live task", () => {
+  test("allows up to the cap, blocks beyond it, and frees a slot on task completion", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "monarch", keywords: [], tools: ["task"], maxMinions: 2 })] });
+      const { handlers, commands, ctx } = await installExtension(dir);
+      await commands["equip"]!.handler("monarch", ctx);
+      await handlers["before_agent_start"]!({ prompt: "orchestrate", systemPrompt: [] }, ctx);
+
+      const call = () => handlers["tool_call"]!({ toolName: "task", input: {} }, ctx) as Promise<{ block?: boolean } | void>;
+      assert.equal((await call())?.block ?? undefined, undefined, "1st summon allowed");
+      assert.equal((await call())?.block ?? undefined, undefined, "2nd summon allowed");
+      assert.equal((await call())?.block, true, "3rd summon blocked at cap 2");
+
+      // A minion returns -> a slot frees -> next summon allowed again.
+      await handlers["tool_execution_end"]!({ toolName: "task" }, ctx);
+      assert.equal((await call())?.block ?? undefined, undefined, "summon allowed after a minion returns");
+
+      // A new gate resets the army entirely.
+      await handlers["before_agent_start"]!({ prompt: "orchestrate again", systemPrompt: [] }, ctx);
+      assert.equal((await call())?.block ?? undefined, undefined, "new gate starts with a fresh army");
+    });
+  });
+});
+
+describe("🗡 Berserker: noConfirm auto-accepts model switches", () => {
+  test("switches model without calling confirm when the build sets noConfirm", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "berserker", keywords: [], noConfirm: true, model: "anthropic/claude-sonnet-5" })],
+      });
+      let confirmCalls = 0;
+      const { handlers, commands, setModelCalls, ctx } = await installExtension(dir, {
+        confirm: async () => {
+          confirmCalls++;
+          return true;
+        },
+        resolve: (m) => ({ id: m.split("/")[1] ?? m, provider: "anthropic" }),
+        currentModel: { id: "claude-haiku-4-5-20251001", provider: "anthropic" },
+      });
+      await commands["equip"]!.handler("berserker", ctx);
+      await handlers["before_agent_start"]!({ prompt: "go", systemPrompt: [] }, ctx);
+      assert.equal(confirmCalls, 0, "Berserker must not open a confirm dialog");
+      assert.equal(setModelCalls.length, 1, "model must still switch");
+    });
+  });
+});
+
+describe("🗡 /arise: Shadow Extraction persists one approved rule", () => {
+  test("appends a distilled rule to the named profile in bundles.json after confirm", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "implementation", keywords: ["impl-kw"], rules: ["existing-rule"] })] });
+      const { commands, ctx } = await installExtension(dir);
+
+      // /arise with no args asks the model to distill (sends a followUp message).
+      await commands["arise"]!.handler("", ctx);
+
+      // /arise <profile> <rule> persists it.
+      await commands["arise"]!.handler('implementation Prefer the framework native facility.', ctx);
+      const written = JSON.parse(fs.readFileSync(path.join(dir, ".omp", "bundles.json"), "utf-8")) as Bundles;
+      const impl = written.profiles.find((p) => p.name === "implementation")!;
+      assert.deepEqual(impl.rules, ["existing-rule", "Prefer the framework native facility."]);
+
+      // Re-arising the same rule is a no-op (dedup), so the file is unchanged.
+      await commands["arise"]!.handler('implementation Prefer the framework native facility.', ctx);
+      const again = JSON.parse(fs.readFileSync(path.join(dir, ".omp", "bundles.json"), "utf-8")) as Bundles;
+      assert.equal(again.profiles.find((p) => p.name === "implementation")!.rules!.length, 2, "dedup: no duplicate rule");
+    });
+  });
+
+  test("/arise into an unknown profile errors and writes nothing", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "implementation", keywords: ["impl-kw"] })] });
+      const { commands, notifications, ctx } = await installExtension(dir);
+      await commands["arise"]!.handler("nonesuch some rule text", ctx);
+      assert.ok(notifications.some((n) => n.level === "error" && n.msg.includes("nonesuch")), "must error on unknown profile");
+    });
   });
 });
