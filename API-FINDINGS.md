@@ -221,6 +221,64 @@ logging gated on `PROFILE_ROUTER_DEBUG=1`.
 
 ---
 
+## (f) ARSENAL mechanics — event surfaces (verified for the game-design layer)
+
+All four events below are real members of the `ExtensionAPI.on(...)` overload
+set (`src/extensibility/extensions/types.ts:1000-1046`) — i.e. subscribable
+from an extension, not hook-only — and every handler receives
+`(event, ctx: ExtensionContext)` (`extensions/types.ts:972`), so `ctx.ui`
+(`notify`/`setStatus`/`confirm`) is available inside each.
+
+**🔥 Embers — `session.compacting`** (`types.ts:1016`):
+`on("session.compacting", handler: ExtensionHandler<SessionCompactingEvent, SessionCompactingResult>)`.
+- Event (`shared-events.ts:77-80`): `{ type, sessionId, messages }`.
+- Result (`shared-events.ts:343-350`):
+  `{ context?: string[]; prompt?: string; preserveData?: Record<string,unknown> }`.
+  `context` is documented as *"Additional context lines to include in
+  summary"* — so returning the active profile's rules here carries them
+  **through** compaction, which is exactly the re-injection the mechanic
+  needs. Verified end-to-end in `test/profile-router.test.ts` ("🔥 Embers").
+
+**🩸 Poison — `credential_disabled`** (`types.ts:1046`):
+`on("credential_disabled", handler: ExtensionHandler<CredentialDisabledEvent>)`.
+- Event (`types.ts:632-640`): `{ type, provider: string, disabledCause: string }`,
+  documented as *"Fired when AuthStorage automatically soft-disables a
+  credential (e.g. OAuth `invalid_grant`). Not fired for user-initiated
+  `remove()`…"* — i.e. precisely the silent-fallback trigger. Note the
+  sibling `after_provider_response` event only extends
+  `ProviderResponseMetadata` (`pi-ai/src/types.ts`: `{ status, headers,
+  requestId?, metadata? }`) — it carries **no** model/provider identity, so
+  it cannot be used to detect *which* model actually answered. `credential_disabled`
+  is the correct and only clean signal.
+
+**⚖ Sentinel / 👑 Monarch — `tool_call` + `tool_execution_end`**:
+- `tool_call` blocking by exact literal `toolName` — the named variants are
+  `"bash"|"read"|"edit"|"write"|"grep"|"glob"` (`types.ts:709-738`) and
+  `"task"` flows through `CustomToolCallEvent.toolName: string` (`types.ts:739-742`),
+  confirmed against finding (d). `disabledTools` blocks on `toolName`;
+  `maxMinions` blocks the `task` tool.
+- `tool_execution_end` (`types.ts:614-620`): `{ type, toolCallId, toolName,
+  result, isError }` — carries `toolName`, so a returning `task` subagent can
+  be counted to release a summon slot. `tool_execution_start` (`:596-601`)
+  carries the same. Summons are hard-reset per gate in `before_agent_start`
+  so a missed end-event cannot leak.
+
+**🗡 /arise — `sendUserMessage`** (`types.ts:1127-1131`):
+`sendUserMessage(content: string | (TextContent|ImageContent)[], options?: { deliverAs?: "steer"|"followUp" }): void`
+— documented *"Send a user prompt: idle starts a turn; streaming queues as
+steer unless deliverAs is set."* Used with `deliverAs: "followUp"` to ask the
+current model to distill a rule. Persistence is a plain `fs.writeFileSync`
+back to the resolved `bundles.json` path (`resolveBundlesPath`), gated on
+`ctx.ui.confirm` — no special API needed. The command context type is the
+real `ExtensionCommandContext` (`types.ts:403`, extends `ExtensionContext`).
+
+**Not built — no read surface exists.** *Bleed* would need a live token /
+context-size read and *Elixir* a rate-limit-headroom read; neither is exposed
+to an extension (the `context` event at `types.ts:1021` hands over
+`messages: AgentMessage[]` but no token accounting, and rate-limit state is
+only observable reactively on a 429). Building either would be a guess, so
+they are intentionally omitted — recorded in `DECISIONS.md`.
+
 ---
 
 ## Deep runtime verification (beyond static typecheck)

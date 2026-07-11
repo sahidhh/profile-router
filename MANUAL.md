@@ -62,6 +62,9 @@ Steps:
       "skills": ["..."],           // informational — surfaced as a "Recommended Skills" hint block
       "tools": ["..."],            // active toolset when this profile (or the union of matches) is non-empty
       "disabledAgents": ["..."],   // subagent names to block via the `task` tool's `agent` param
+      "disabledTools": ["..."],    // tool names hard-blocked at tool_call (e.g. ["edit","write","bash"]) — the Sentinel oath
+      "maxMinions": 3,             // cap on live `task` subagents — the Monarch summon cap (omit = uncapped)
+      "noConfirm": false,          // auto-accept model switches without a dialog — the Berserker flag
       "model": "provider/id",      // e.g. "anthropic/claude-sonnet-5" — resolved via ctx.models.resolve()
       "thinkingLevel": "low|medium|high"
     }
@@ -69,22 +72,37 @@ Steps:
 }
 ```
 
+A profile with an **empty `keywords` list** is a **class build**: it is never
+auto-classified, and is only reachable via `/equip <name>` (or `/profile
+<name>`). See §8.
+
 **Merge semantics** (fixed, do not redesign — see `API-FINDINGS.md` and the
 mission's hard constraints):
 
 - `rules`, `skills`, `tools`: **union with dedup** across every matched
   profile.
+- `disabledTools`: **union** across matched profiles — the *opposite* of
+  `disabledAgents`. A tool block is a safety oath, so any matched profile
+  that blocks a tool wins; a co-matched permissive profile can never dilute
+  it. Enforced at `tool_call` by exact `toolName` (`edit`/`write`/`bash`/…).
 - `disabledAgents`: **intersection** across matched profiles — an agent is
   blocked only if *every* matched profile disables it. One matched profile
   that needs an agent keeps it enabled for the whole merged set.
+- `maxMinions`: **minimum** of the values that matched profiles declare (the
+  tightest cap wins); profiles that omit it don't loosen the cap. If no
+  matched profile declares it, summons are uncapped.
+- `noConfirm`: **OR** — if any matched profile sets it, model switches this
+  turn are auto-accepted (no confirm dialog). Guardrails still apply; only
+  the dialog is skipped.
 - `model`, `thinkingLevel`: **single-value** — the highest-scoring matched
   profile wins; ties break on declaration order in `bundles.json` (earlier
   wins). The shipped config declares the generic `lookup` profile **last**
   specifically so a tie between `lookup` and any more specific profile
   (`premium`, `investigation`, `implementation`, ...) resolves to the
   specific profile — see `VERIFICATION-REPORT.md` "Post-audit fixes".
-- No match: falls back to `default` (if present); `disabledAgents` becomes
-  whatever `default.disabledAgents` says (empty if unset).
+- No match: falls back to `default` (if present); `disabledAgents`,
+  `disabledTools`, `maxMinions`, and `noConfirm` all come from `default`
+  (empty / undefined / false if unset).
 
 ### The authored config, annotated
 
@@ -153,22 +171,49 @@ On **every** prompt submission (`before_agent_start`):
    ```
    If nothing matched and `default` has no rules, nothing is appended —
    zero UI/prompt noise.
-10. **Subagent blocking**: on every `tool_call` for the built-in `task`
-    tool, if the invoked agent (`input.agent`, defaulting to `"task"`) is
-    in the merged `disabledAgents` list, the call is blocked with a reason
-    shown to the LLM (`{ block: true, reason: "..." }"`).
+10. **Tool blocking**: on every `tool_call`, if the tool's `toolName` is in
+    the merged `disabledTools` list, the call is blocked
+    (`{ block: true, reason: "..." }`) — the Sentinel oath. Separately, for
+    the built-in `task` tool, the call is blocked if the invoked agent
+    (`input.agent`, defaulting to `"task"`) is in `disabledAgents`, **or** if
+    the number of live summons has reached `maxMinions` (the Monarch cap).
+11. **Summon accounting** (Monarch): a `task` reserves a slot when approved
+    at `tool_call` and releases it at `tool_execution_end`; the live count
+    hard-resets to 0 at the start of each gate (`before_agent_start`) so a
+    lost end-event can never leak permanently.
+
+Two out-of-band hooks fire independently of the per-prompt flow:
+
+- **🔥 Embers** (`session.compacting`): when the session compacts, the active
+  profile's `rules` are re-injected into the compaction summary as preserved
+  context, and you're notified `🔥 Ember restored`. Without this, per-gate
+  rules silently vanish when context is compacted.
+- **🩸 Poison** (`credential_disabled`): if a provider credential is
+  soft-disabled (e.g. OAuth `invalid_grant`) and OMP falls back to a backup
+  model, a persistent `☠ fallback: <provider> disabled` status marker is set
+  and you're warned — so you never *unknowingly* run on the backup.
 
 ---
 
-## 4. `/profile` command reference
+## 4. Command reference
 
-- `/profile` — show the currently active profile(s), their match scores,
-  resolved model, thinking level, and disabled agents.
+- `/profile` — show the active profile(s), match scores, resolved model,
+  thinking level, disabled agents, blocked tools, and summon cap.
 - `/profile <name>` — pin classification to a single named profile until
   cleared. Rejects unknown names with the list of profiles actually loaded
   from `bundles.json` (helps catch typos immediately, never silently no-ops).
 - `/profile clear` — remove the pin and resume automatic keyword
   classification on the next prompt.
+- `/equip <name>` / `/equip clear` — flavored alias of `/profile` for
+  equipping class builds (see §8). Same machinery.
+- `/arise` — Shadow Extraction. With no args, asks the current model to
+  distill exactly **one** reusable rule from the session (sent as a follow-up
+  prompt). Then `/arise <profile> <rule text>` shows the rule, asks you to
+  confirm, and on approval appends it to that profile's `rules` in
+  `bundles.json` (deduped; one rule per extraction; manual approval always).
+- `/rank` — Hunter Rank card for this session: gates cleared per class,
+  bosses (high/max-thinking gates) fought, and any active poison. In-session
+  only; resets when the session restarts.
 
 ---
 
@@ -286,3 +331,44 @@ behavior. Each exercises a different mechanism.
    Expect: status line shows `⚙ default`; no rules block is injected unless
    `default.rules` is non-empty in your `bundles.json` (it is, by default,
    in the shipped config — expect the two baseline rules).
+
+---
+
+## 8. ARSENAL — class builds
+
+The shipped `bundles.json` also declares six **class builds** on top of the
+seven task profiles. A class build is a keyword-less profile: it is never
+auto-classified — you *equip* it deliberately with `/equip <name>` (or
+`/profile <name>`), and clear it with `/equip clear`. Classes are the "gear
+axis" — they set the model tier, tool loadout, and subagent policy for a
+run; the task profiles are the "what am I doing" axis. Equipping a class
+replaces auto-classification for as long as it's pinned.
+
+| Class | Model | Loadout | What it's for |
+|---|---|---|---|
+| **wretch** | Haiku, low | `read`/`grep`/`glob`, subagents off | The SL1 challenge run — clear a gate with the least possible spend. Lookups, one-liners. |
+| **vanguard** | Sonnet, medium | full standard tools, subagents off | The daily driver. 80% of implement/fix/refactor sessions. |
+| **archmage** | Opus, high | full tools, subagents off (delegates to no one) | Architecture/design/migration boss fights. Deliberate, expensive, rare. |
+| **monarch** | Sonnet, low | `read`/`grep`/`glob` + `task`, **subagents on, `maxMinions: 3`** | Thin orchestrator: a cheap general commanding expensive soldiers. A real cost architecture. |
+| **sentinel** | Sonnet, high | `read`/`grep`/`glob`, **`edit`/`write`/`bash` hard-blocked** | A reviewer that *physically cannot* modify files. Equip before any review — the oath is the permission model. |
+| **berserker** | Sonnet, medium | full tools, **`noConfirm: true`** | Long unattended runs — skips model-switch dialogs. Equip knowingly; guardrails still hold. |
+
+Class mechanics you'll see at runtime:
+
+- **Sentinel** — try to `edit` while it's equipped and the call is blocked
+  with `Tool "edit" is forbidden by the sentinel oath`.
+- **Monarch** — the 4th simultaneously-live `task` is blocked with *"Your
+  army is at its limit, Monarch."* A slot frees when a subagent returns.
+- **Berserker** — model switches apply without a confirm dialog (you'll get
+  an `⚔ Berserker: switching…` notice instead).
+
+**🗡 Shadow Extraction (`/arise`)** grows a profile's rule library from actual
+experience instead of upfront speculation: after a hard session, `/arise`
+asks the model to distill one reusable rule, and `/arise <profile> <rule>`
+appends it to `bundles.json` after you approve it. One rule per extraction,
+manual approval always.
+
+**Deferred by design** (honesty): *Bleed* (a context-fill meter) and *Elixir*
+(a free-tier rate-limit meter) are **not** built — OMP exposes no token-count
+or rate-limit-headroom read surface to an extension (only reactive 429s), so
+a meter would be guesswork. See `DECISIONS.md`.

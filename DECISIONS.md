@@ -199,3 +199,83 @@ here. Ordered roughly by the phase in which it arose.
     manual test a human runs by hand is guaranteed consistent with what CI
     already verified — no drift between "what we tested" and "what we tell
     the user to try."
+
+---
+
+## Phase 5 — ARSENAL game-design layer
+
+Every mechanic below was mapped to a **verified** OMP event surface before
+building (evidence in `API-FINDINGS.md` §(f)); the two that had no read
+surface were dropped rather than faked.
+
+19. **Class builds are keyword-less profiles, not a new concept.** The six
+    classes (Wretch/Vanguard/Archmage/Monarch/Sentinel/Berserker) are added
+    to the same `profiles` array with `keywords: []`. `classify()` scores
+    them 0 forever (no keyword → no regex → no hit), so they never
+    auto-match; they are reachable only through the existing manual-override
+    path (`/equip` is a thin alias of `/profile`). This reuses the whole
+    existing override + merge machinery instead of inventing a parallel
+    "loadout" subsystem — the smallest change that realizes the design. The
+    reachability test that previously asserted *"no profile has an empty
+    keyword list"* was reframed to *"task profiles have keywords; class
+    builds have none and never auto-match."*
+
+20. **`disabledTools` merges as UNION (restrictive), the opposite of
+    `disabledAgents`' INTERSECTION.** A tool block is the Sentinel's safety
+    oath — "sworn to judge, forbidden to touch." If it merged permissively
+    (intersection), a co-matched profile that happens to allow `edit` would
+    silently dissolve the oath, which is exactly the failure the mechanic
+    exists to prevent. Union is the conservative choice: the most
+    restrictive matched profile wins. Enforced at `tool_call` by exact
+    `toolName`.
+
+21. **`maxMinions` merges as MIN; omission does not loosen it.** The tightest
+    declared summon cap among matched profiles wins; a profile that doesn't
+    declare a cap contributes nothing (rather than an implicit ∞ that would
+    erase another profile's cap). No matched cap at all → uncapped.
+
+22. **Summon accounting reserves at `tool_call`, releases at
+    `tool_execution_end`, hard-resets at `before_agent_start`.** Reserving
+    at approval time (not at `tool_execution_start`) is deliberate: a burst
+    of `task` calls emitted in one turn all fire `tool_call` before any
+    execution starts, so counting at execution-start would let all of them
+    read a stale live-count of 0 and blow past the cap. The per-gate
+    hard-reset bounds any leak from a missed `tool_execution_end` to a
+    single gate. Trade-off accepted and documented rather than pursuing
+    exact concurrency tracking, which the event model doesn't cleanly
+    support.
+
+23. **`noConfirm` (Berserker) merges as OR and skips only the dialog, never
+    a guardrail.** It sets `approved = true` in the model-switch path in
+    place of the `ctx.ui.confirm` call, and still memoizes the decision per
+    `(from→to)` pair like a manual answer would. Rules injection, tool
+    blocks, and summon caps are all untouched — the flag buys unattended
+    autonomy, not reduced safety. A visible `⚔ Berserker: switching…` notice
+    replaces the suppressed dialog so the switch is never fully silent.
+
+24. **`/arise` persists a user-approved rule; it does not auto-write model
+    output.** The verified `sendUserMessage(..., { deliverAs: "followUp" })`
+    lets `/arise` (no args) ask the current model to distill one rule, but an
+    extension command handler cannot synchronously read that future turn's
+    response. Rather than build a fragile multi-turn `message_end` scraper,
+    the persist step is an explicit second command — `/arise <profile>
+    <rule>` — gated on `ctx.ui.confirm`, deduped, one rule per extraction.
+    This honors the design's own "manual approval always" cap and keeps the
+    write path simple and auditable. Writes go to `resolveBundlesPath(cwd)`,
+    which mirrors `loadBundles`' read precedence (existing project file →
+    existing global file → project path).
+
+25. **Bleed and Elixir were NOT built.** Both need a read surface OMP does
+    not expose to extensions (live token/context size for Bleed;
+    rate-limit headroom for Elixir — observable only reactively on a 429).
+    A meter driven by guesses would be worse than none, and the design doc
+    itself flags both as `🧪 needs verification`. Verification came back
+    negative, so they are omitted and the omission is stated in `MANUAL.md`
+    §8 and `API-FINDINGS.md` §(f). *Poison* (silent-fallback marker) covers
+    the one degraded-state signal that IS observable (`credential_disabled`).
+
+26. **Hunter Rank (`/rank`) is in-session only, no persistence.** It tallies
+    gates-cleared-per-class and high/max-thinking "bosses" in memory and
+    resets on session restart. Persisting to a stats file would add a
+    write-side-effect and a schema to a router whose job is routing; the
+    flavor value doesn't justify that footprint. Kept deliberately tiny.
