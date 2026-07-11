@@ -296,6 +296,26 @@ describe("bundles.json reachability", () => {
     });
   }
 
+  test("summarisation vocabulary routes to lookup (cheap model), not a judgment profile", () => {
+    for (const promptText of [
+      "summarize what this repo does",
+      "give me an overview of the payment flow",
+      "summarise the config loading logic",
+    ]) {
+      const hits = classify(promptText, realBundles);
+      assert.ok(hits.length > 0, `expected a match for: "${promptText}"`);
+      assert.equal(hits[0]?.profile.name, "lookup", `expected lookup to win "${promptText}"`);
+    }
+  });
+
+  test("every code-exploring profile carries the lsp and ast_grep tools", () => {
+    for (const p of realBundles.profiles) {
+      if (p.name === "hotfix") continue; // deliberate minimal toolset — ceremony floor
+      assert.ok(p.tools?.includes("lsp"), `profile "${p.name}" missing lsp`);
+      assert.ok(p.tools?.includes("ast_grep"), `profile "${p.name}" missing ast_grep`);
+    }
+  });
+
   test("no profile has an empty keyword list", () => {
     for (const p of realBundles.profiles) {
       assert.ok(p.keywords.length > 0, `profile "${p.name}" has no keywords`);

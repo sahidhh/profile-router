@@ -95,13 +95,62 @@ one profile (`lookup`) that salvage didn't directly supply — see
 
 | Profile | Salvage source | Model tier | Why |
 |---|---|---|---|
-| `lookup` | Synthesized: EP-Investigation's read-only tool policy + EKC's "retrieval, not judgment → Haiku" cost rule | Haiku (cheap), low thinking | Lightweight search/find/explain; tools restricted to `read`/`grep`/`glob`; subagents disabled |
+| `lookup` | Synthesized: EP-Investigation's read-only tool policy + EKC's "retrieval, not judgment → cheap model" cost rule | Gemini 2.5 Flash-Lite (cheap instruct-class), low thinking | Lightweight search/find/explain/summarise; LSP/AST-first exploration; tools restricted to `read`/`grep`/`glob`/`lsp`/`ast_grep`; subagents disabled |
 | `architecture` | EP-Architecture | Sonnet, high thinking | Heavy/thinking profile for system design — decides, doesn't build |
 | `implementation` | EP-Implementation | Sonnet, medium thinking | Build against a settled plan |
 | `review` | EP-Review | Sonnet, high thinking | Multi-pass audit; findings only, no edits |
 | `investigation` | EP-Investigation | Sonnet, medium thinking | Root-cause debugging; read-only |
 | `premium` | EP-Premium | Opus, high thinking | Schema/secrets/migrations — the T1 safety-floor profile |
-| `hotfix` | EP-FastCheap | Haiku, low thinking | Reversible UI fixes under time pressure; guardrails still apply |
+| `hotfix` | EP-FastCheap | DeepSeek V4 Flash (cheap), low thinking | Reversible UI fixes under time pressure; guardrails still apply |
+
+### Cheap-tier models: not just Claude variants
+
+The judgment tiers (`architecture`/`review`/`premium`/…) stay on
+Anthropic models, but the token-efficient tiers (`lookup`, `hotfix`) are
+"retrieval/mechanical work, not judgment" — any competent cheap
+instruct-class model does the job. The shipped config routes `lookup` to
+`google/gemini-2.5-flash-lite` and `hotfix` to `deepseek/deepseek-v4-flash`.
+All of the following strings are **verified against the installed
+`@oh-my-pi/pi-catalog` `models.json`** (v16.4.1) and are drop-in
+replacements for a cheap profile's `model` field:
+
+| Family | `bundles.json` string | Resolves via |
+|---|---|---|
+| Gemini 2.5 Flash-Lite | `google/gemini-2.5-flash-lite` | `google` first-party, or OpenRouter (same string is a raw OpenRouter id) |
+| Gemini 2.5 Flash | `google/gemini-2.5-flash` | same dual path |
+| DeepSeek V4 Flash | `deepseek/deepseek-v4-flash` | `deepseek` first-party, or OpenRouter (`deepseek/deepseek-v4-flash:free` also exists) |
+| DeepSeek V3.2 | `deepseek/deepseek-v3.2` | OpenRouter |
+| MiniMax M3 | `minimax/minimax-m3` | `minimax` first-party (`MiniMax-M3`), or OpenRouter |
+| IBM Granite 4.0 micro | `ibm-granite/granite-4.0-h-micro` | Kilo (raw id match) |
+| IBM Granite 4.1 8B | `ibm-granite/granite-4.1-8b` | OpenRouter / CoreWeave / Kilo |
+| Qwen 2.5 7B Instruct | `qwen/qwen-2.5-7b-instruct` | OpenRouter |
+| Trinity preview ("thy3 preview") | `arcee-ai/trinity-large-preview` | OpenRouter (`:free` variant exists) / Kilo / NanoGPT |
+
+Notes:
+
+- `ctx.models.resolve()` only matches **credentialed** providers. Strings
+  in `provider/id` form fall back to raw-id matching, so
+  `google/gemini-2.5-flash-lite` resolves through OpenRouter even without
+  a Google key (OpenRouter ids are themselves `vendor/model` shaped).
+- Picking a model the user has no credentials for is safe: the extension
+  warns once and continues on the current model — it never silently
+  degrades or crashes (see §6).
+- Keep judgment work (schema, security, architecture verdicts) on the
+  premium tiers; the cheap tier is for retrieval, summarisation, and
+  small reversible edits.
+
+### Exploration standard: LSP + AST first, cheap model summarises
+
+Every profile that explores code (`lookup`, `investigation`,
+`architecture`, `review`, `implementation`, `premium`) now carries OMP's
+built-in `lsp` and `ast_grep` tools (verified names in
+`src/tools/builtin-names.ts`) and a shared rule: **locate via LSP
+symbols/definitions/references or `ast_grep` structural patterns before
+plain grep or bulk file reads**. Structural search returns precise
+`file:line` spans instead of whole files, which is what makes routing
+`lookup` to a micro/instruct-class model viable — the model only has to
+summarise the spans the tools already found, not reason over bulk
+context.
 
 ---
 

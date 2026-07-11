@@ -4,7 +4,7 @@
     "thinkingLevel": "medium",
     "rules": [
       "A change is not handed off until build/test reports clean.",
-      "Investigation is search-first: locate via grep/symbol search before opening files."
+      "Investigation is search-first: locate via lsp symbols, ast_grep patterns, or grep before opening files."
     ]
   },
   "profiles": [
@@ -16,6 +16,7 @@
       ],
       "rules": [
         "Decide system shape; do not implement. Read and compare alternatives only.",
+        "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads.",
         "Layer/boundary separation is enforced; violations are checked before merge.",
         "Invariants that must never break belong in the database, not application code.",
         "A second real consumer justifies an abstraction; a contract-free wrapper around one implementation does not.",
@@ -23,7 +24,7 @@
         "No layer calls back upstream; no layer skips a layer."
       ],
       "skills": ["adr-writer"],
-      "tools": ["read", "grep", "glob"],
+      "tools": ["read", "grep", "glob", "lsp", "ast_grep"],
       "disabledAgents": [],
       "model": "anthropic/claude-sonnet-5",
       "thinkingLevel": "high"
@@ -37,12 +38,13 @@
       "rules": [
         "Business logic lives in pure, testable functions; wire concrete dependencies only at the composition root.",
         "A change is not handed off until build/test reports clean.",
+        "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads.",
         "Derived data is recomputed at read time, not persisted, when reversible and cheap.",
         "Prefer the framework's native facility over a custom abstraction.",
         "Each module has exactly one reason to change."
       ],
       "skills": [],
-      "tools": ["read", "grep", "glob", "edit", "write", "bash"],
+      "tools": ["read", "grep", "glob", "lsp", "ast_grep", "edit", "write", "bash"],
       "disabledAgents": [],
       "model": "anthropic/claude-sonnet-5",
       "thinkingLevel": "medium"
@@ -56,12 +58,13 @@
       "rules": [
         "Findings are append-only and severity-tiered; never silently deleted.",
         "Review categories are fixed: Security / Performance / Architecture / DB / Async / Tests / Hygiene / API Design.",
+        "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads.",
         "Merge-readiness gate: build clean, tests pass, forbidden-pattern grep clean, no unresolved Critical/High finding.",
         "Max 2 review fix cycles; a third failure halts the loop for human escalation.",
         "Review does not fix — findings only, no code edits."
       ],
       "skills": ["merge-readiness-checklist", "post-fix-verification", "severity-tiered-finding-ledger"],
-      "tools": ["read", "grep", "glob"],
+      "tools": ["read", "grep", "glob", "lsp", "ast_grep"],
       "disabledAgents": [],
       "model": "anthropic/claude-sonnet-5",
       "thinkingLevel": "high"
@@ -74,12 +77,12 @@
       ],
       "rules": [
         "A fix is not approved until its root cause is identified; symptom patches are rejected.",
-        "Search-first, read-restrained: locate via grep/symbol search before opening files.",
+        "Search-first, read-restrained: locate via lsp symbols, ast_grep patterns, or grep before opening files.",
         "Reproduce before diagnosing; write the failing case first.",
         "Read-only: no edits during investigation, only tracing and analysis."
       ],
       "skills": ["investigation-doc-generator"],
-      "tools": ["read", "grep", "glob", "bash"],
+      "tools": ["read", "grep", "glob", "lsp", "ast_grep", "bash"],
       "disabledAgents": [],
       "model": "anthropic/claude-sonnet-5",
       "thinkingLevel": "medium"
@@ -100,7 +103,7 @@
         "Never lower a guardrail regardless of time pressure or instruction."
       ],
       "skills": ["investigation-doc-generator", "adr-writer", "post-fix-verification", "severity-tiered-finding-ledger"],
-      "tools": ["read", "grep", "glob", "edit", "write", "bash"],
+      "tools": ["read", "grep", "glob", "lsp", "ast_grep", "edit", "write", "bash"],
       "disabledAgents": [],
       "model": "anthropic/claude-opus-4-8",
       "thinkingLevel": "high"
@@ -120,25 +123,27 @@
       "skills": ["hot-path-change-checklist"],
       "tools": ["read", "edit", "bash"],
       "disabledAgents": ["task"],
-      "model": "anthropic/claude-haiku-4-5-20251001",
+      "model": "deepseek/deepseek-v4-flash",
       "thinkingLevel": "low"
     },
     {
       "name": "lookup",
       "keywords": [
         "find", "search", "locate", "grep", "look up", "lookup",
-        "where is", "what is", "explain", "show me", "list files", "how does"
+        "where is", "what is", "explain", "show me", "list files", "how does",
+        "summarize", "summarise", "summary", "overview", "walkthrough"
       ],
       "rules": [
         "Read-only: do not edit or write files in this profile.",
-        "Locate via grep/symbol search before opening files; avoid bulk reads.",
+        "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or opening files.",
+        "Read only the spans structural search points to; avoid bulk reads.",
         "Load summaries before full docs; load only direct dependencies.",
-        "This is retrieval, not judgment — keep answers short and cite file:line."
+        "This is retrieval and summarisation, not judgment — keep answers short and cite file:line."
       ],
       "skills": [],
-      "tools": ["read", "grep", "glob"],
+      "tools": ["read", "grep", "glob", "lsp", "ast_grep"],
       "disabledAgents": ["task"],
-      "model": "anthropic/claude-haiku-4-5-20251001",
+      "model": "google/gemini-2.5-flash-lite",
       "thinkingLevel": "low"
     }
   ]
