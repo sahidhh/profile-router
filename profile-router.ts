@@ -85,10 +85,25 @@ export function classify(prompt: string, bundles: Bundles): { profile: Profile; 
 
   bundles.profiles.forEach((profile, order) => {
     let score = 0;
-    for (const kw of profile.keywords) {
+    // Claimed text spans, so a longer phrase (e.g. "code review") and a shorter
+    // keyword it contains (e.g. "review") can't both score off the same words.
+    const claimed: [number, number][] = [];
+    const overlapsClaimed = (start: number, end: number) => claimed.some(([s, e]) => start < e && s < end);
+
+    const byLengthDesc = [...profile.keywords].sort((a, b) => b.length - a.length);
+    for (const kw of byLengthDesc) {
       // Word-boundary match beats naive substring ("fix" shouldn't hit "prefix").
-      const re = new RegExp(`\\b${kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
-      if (re.test(text)) score += 1;
+      const re = new RegExp(`\\b${kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g");
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text))) {
+        const start = m.index;
+        const end = start + m[0].length;
+        if (!overlapsClaimed(start, end)) {
+          claimed.push([start, end]);
+          score += 1;
+          break;
+        }
+      }
     }
     if (score > 0) hits.push({ profile, score, order });
   });
@@ -156,6 +171,7 @@ export default function (pi: ExtensionAPI) {
   let active: MergedConfig | null = null;
   let manualOverride: string | null = null;        // set via /profile <name>
   const modelDecisions = new Map<string, boolean>(); // "from→to" -> user's answer, for this session
+  const unresolvedModelWarned = new Set<string>();   // model strings already warned about this session
 
   const debugLog = (msg: string, context?: Record<string, unknown>) => {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
@@ -166,10 +182,20 @@ export default function (pi: ExtensionAPI) {
     const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
 
     let matches = classify(event.prompt, bundles);
+    let overrideApplied = false;
 
     if (manualOverride) {
       const p = bundles.profiles.find((x) => x.name === manualOverride);
-      if (p) matches = [{ profile: p, score: Number.POSITIVE_INFINITY }];
+      if (p) {
+        matches = [{ profile: p, score: Number.POSITIVE_INFINITY }];
+        overrideApplied = true;
+      } else {
+        // The pinned profile no longer exists (renamed/removed in bundles.json).
+        // Clear the stale pin rather than silently falling back to auto-classification
+        // while still labeling it as manually overridden.
+        ctx.ui.notify(`Profile override "${manualOverride}" no longer exists — clearing pin, resuming auto-classification`, "warning");
+        manualOverride = null;
+      }
     }
 
     const next = merge(matches, bundles);
@@ -181,7 +207,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus(
       "profile",
       next.matched.length
-        ? `⚙ ${next.matched.map((m) => m.name).join("+")}${manualOverride ? " (manual)" : ""}`
+        ? `⚙ ${next.matched.map((m) => m.name).join("+")}${overrideApplied ? " (manual)" : ""}`
         : "⚙ default",
     );
 
@@ -207,6 +233,11 @@ export default function (pi: ExtensionAPI) {
           }
         }
       } else if (!resolved) {
+        if (!unresolvedModelWarned.has(next.model)) {
+          unresolvedModelWarned.add(next.model);
+          const profileNames = next.matched.map((m) => m.name).join("+") || "default";
+          ctx.ui.notify(`Profile "${profileNames}" references model "${next.model}" which could not be resolved — continuing with the current model`, "warning");
+        }
         debugLog("model not resolvable", { model: next.model });
       }
     }

@@ -99,3 +99,127 @@ The implementation is unusually solid on the axis this audit weighted most heavi
 3. **Model-routing confirm fatigue**: `modelDecisions` memoizes by exact `(from→to)` pair for the life of the process — if a user declines once, they won't be asked again for that same pair even across many unrelated prompts later in a long session; worth watching whether that produces a "why didn't it ask me this time" surprise in a long real session.
 4. **Skills field is inert**: `skills` in `bundles.json` is rendered as an LLM-visible hint block only — nothing forces the model to actually invoke a named skill. If a user expects `skills: ["adr-writer"]` to guarantee that skill fires, real usage will surface that expectation gap.
 5. **No live OMP session was ever exercised end-to-end** in this environment (`dist/cli.js` doesn't parse here) — the deepest verification available was loading the extension through the real, non-exported `ConcreteExtensionAPI`/`loadExtensionFromFactory` internals. The actual TUI status-line rendering, actual `/reload` behavior, and actual provider-credential-gated `pi.setModel` failure path have only been verified structurally, never visually/interactively.
+
+---
+
+## 5. Post-audit fixes
+
+Four of the findings above (F2, F3, F4, F5) were left as "proposed only" by
+the original audit pending an authoring/product decision. All four have now
+been applied, minimally, in this pass. `npm run typecheck` is clean and
+`npm test` is 36/36 green (31 original + 5 new regression tests), after
+updating the fixtures affected by the F4 scoring change.
+
+### F2 — stale `/profile` override no longer mislabeled as manual
+
+`profile-router.ts`: `before_agent_start` now tracks whether the pin
+actually resolved to a real profile this turn (`overrideApplied`, local to
+the handler) instead of trusting the `manualOverride` variable's mere
+truthiness for the `(manual)` status-line suffix. If the pinned name is no
+longer found in `bundles.json`, the pin is cleared immediately, a
+`ctx.ui.notify(..., "warning")` explains the fallback, and the status line
+reflects plain auto-classification with no `(manual)` suffix.
+
+Regression test: `test/profile-router.test.ts` → "F2 regression: stale
+/profile override never mislabels an auto-classified profile as manual".
+Drives the real `before_agent_start` and `/profile` handlers through a fake
+`ExtensionAPI`/`ctx` harness: pins a profile, rewrites `bundles.json` to
+remove it, confirms the next prompt's status is `⚙ other-profile` (no
+`(manual)`), a warning fires exactly once, and a further prompt against a
+third profile isn't somehow still influenced by the cleared pin.
+
+### F3 — unresolvable model now warns once per session
+
+`profile-router.ts`: added a per-extension-instance `unresolvedModelWarned`
+`Set<string>` keyed by the unresolved model string. On the `!resolved`
+branch (previously only a `DEBUG`-gated `pi.logger.debug` call), a
+`ctx.ui.notify(..., "warning")` now fires the first time a given bad model
+string is hit in a session, naming both the matched profile(s) and the bad
+model string; repeats of the same string are silent (still degrade to "keep
+current model", never crash). The existing debug log line is unchanged and
+still fires every time regardless of the dedup.
+
+Regression test: "F3 regression: unresolvable model warns exactly once per
+session" — a profile with `model: "anthropic/does-not-exist"` triggers one
+warning containing the profile name and the model string on first match,
+zero additional warnings on a second matching prompt in the same session.
+
+### F4 — intra-profile keyword self-overlap dedup
+
+`profile-router.ts`: `classify()` no longer scores each keyword
+independently by a bare `.test()`. Per profile, keywords are checked
+longest-first, and each keyword only scores if it has at least one
+regex-match span that doesn't overlap a span already claimed by an
+earlier (longer) keyword's match. This directly fixes the `review` profile
+case (bare `"review"` no longer double-counts against `"code review"` /
+`"pull request review"` when those phrases are what's actually present) while
+leaving genuinely separate occurrences of a short keyword elsewhere in the
+prompt free to score normally (verified by a dedicated test: `"do a code
+review, then review the docs separately"` still scores 2).
+
+This changes `review`'s score for any prompt containing `"code review"` or
+`"pull request review"` from 2 to 1. All fixtures and reachability tests
+were re-run:
+
+- **`test/profile-router.test.ts` fixtures** (`fixtureBundles`,
+  `dupeBundles`, `disjointBundles`): no keyword in any fixture is a
+  substring/superset of another within the same profile, so none of the
+  existing 26 pre-existing assertions changed value — all still pass
+  unmodified.
+- **`bundles.json` reachability suite**: all 7 profiles still win their own
+  trigger prompt after the fix (`review`'s trigger prompt now scores
+  `review:1` instead of `review:2`, but it's still the sole/winning match —
+  no fixture text needed changing).
+- **New tests added** (not fixture edits — genuinely new coverage): the
+  overlap-dedup unit tests described above, plus one asserting the real
+  `bundles.json` `review` profile scores `1`, not `2`, on `"the password
+  reset flow needs a code review before we merge this PR"`.
+
+No existing fixture's *expected value* needed to change — the bug only
+manifested on the one real-world keyword pair (`review` / `code review` /
+`pull request review`) that the original test suite didn't happen to probe
+directly (it now does).
+
+### F5 — tie-break design: `lookup` reordered to declare last
+
+No code changed (the declaration-order tie-break in `classify()`/`merge()`
+is untouched, per the mission's "fixed, do not redesign" constraint).
+`bundles.json`'s `profiles` array was reordered so `lookup` — the generic,
+common-English-keyword profile — is declared **last** instead of first.
+Every other profile's relative order (`architecture`, `implementation`,
+`review`, `investigation`, `premium`, `hotfix`) is unchanged.
+
+**Reachability re-confirmed**: the "bundles.json declares exactly the 7
+expected profiles" and per-profile reachability tests all still pass,
+including `lookup`'s own trigger prompt (`"can you find where the auth
+middleware is defined and explain how it works"`) — `lookup` is still
+reachable and still wins when it's the only real match.
+
+**All 10 adversarial probes re-run** against the fixed `classify()` and
+reordered `bundles.json`:
+
+| # | Prompt | Before (audit) | After (this fix) | Changed? |
+|---|---|---|---|---|
+| 1 | "review this then fix it" | `review:1` → review | `review:1` → review | No |
+| 2 | "what is the token used for in this auth flow" | `lookup:1, premium:1` → lookup | `premium:1, lookup:1` → **premium** | **Yes** — intended: F5 fix, "token" (premium) now outranks generic "what is" (lookup) on tie |
+| 3 | "investigate why the search feature returns duplicate results and then implement a fix" | 3-way tie → lookup | `implementation:1, investigation:1, lookup:1` → **implementation** | **Yes** — lookup no longer wins; among the two remaining specific profiles, `implementation`/`investigation`'s relative declaration order is unchanged from before, so this isn't a new hijack, just lookup dropping out |
+| 4 | "explain why this search algorithm has a bug and trace the root cause" | `lookup:2, investigation:2` → lookup | `investigation:2, lookup:2` → **investigation** | **Yes** — intended: specific profile now wins the tie |
+| 5 | "look up the credential rotation policy in the docs" | `lookup:1, premium:1` → lookup | `premium:1, lookup:1` → **premium** | **Yes** — intended: "credential" (premium) now outranks generic "look up" |
+| 6 | "please reset the discussion and start over with a fresh approach" | no match → default | no match → default | No |
+| 7 | "the password reset flow needs a code review before we merge this PR" | `review:2, premium:1` → review (outright) | `review:1, premium:1` → review (tie-break) | Score mechanism changed (F4 fix removed the self-overlap double-count), **winner unchanged** — review still wins, now via declaration-order tie-break instead of an outright score lead |
+| 8 | "can you show me how the payment token validation logic works, and if there's a bug fix it" | `lookup:1, premium:1` → lookup | `premium:1, lookup:1` → **premium** | **Yes** — intended: "token" (premium) now outranks generic "show me" |
+| 9 | "urgent: this quick fix needs a schema migration too, ship it now" | `premium:2, hotfix:1` → premium | `premium:2, hotfix:1` → premium | No |
+| 10 | "asdkjhasdkjh flibbertigibbet zzzqx unrelated nonsense" | no match → default | no match → default | No |
+
+5 of 10 probes changed winner (#2, #3, #4, #5, #8) — all five are cases
+where `lookup` previously won a tie against a specific profile purely by
+declaration order; in every case the new winner is a specific profile whose
+keyword match is directly relevant to the prompt's actual content (token,
+credential, investigate/implement), which is exactly the residual risk F5
+flagged and the outcome the reordering was meant to produce. No specific
+profile was hijacked by another specific profile — the only shift is
+`lookup` losing ties it previously won by sitting first in the array.
+
+`MANUAL.md` §2 and §3 updated to document: the stale-override auto-clear
+behavior (F2), the new unresolved-model warning (F3), and the intentional
+placement of `lookup` last in `bundles.json` for tie-break purposes (F5).

@@ -79,7 +79,10 @@ mission's hard constraints):
   that needs an agent keeps it enabled for the whole merged set.
 - `model`, `thinkingLevel`: **single-value** — the highest-scoring matched
   profile wins; ties break on declaration order in `bundles.json` (earlier
-  wins).
+  wins). The shipped config declares the generic `lookup` profile **last**
+  specifically so a tie between `lookup` and any more specific profile
+  (`premium`, `investigation`, `implementation`, ...) resolves to the
+  specific profile — see `VERIFICATION-REPORT.md` "Post-audit fixes".
 - No match: falls back to `default` (if present); `disabledAgents` becomes
   whatever `default.disabledAgents` says (empty if unset).
 
@@ -114,7 +117,12 @@ On **every** prompt submission (`before_agent_start`):
 3. Matches are sorted by score descending, then by declaration order in
    `bundles.json` ascending (tiebreak).
 4. If a manual override is pinned (`/profile <name>`), that profile is used
-   with an effectively infinite score, ignoring keyword matching.
+   with an effectively infinite score, ignoring keyword matching. If the
+   pinned name no longer exists in `bundles.json` (renamed/removed since it
+   was pinned), the override is cleared automatically, a warning notifies
+   you of the fallback, and auto-classification resumes for that prompt —
+   the status line will **not** show `(manual)` next to whatever
+   auto-classified profile happens to match.
 5. Fields are merged per the semantics above.
 6. **Status line** updates to `⚙ profile-a+profile-b` (or `⚙ default` on no
    match; `(manual)` suffix when pinned).
@@ -125,7 +133,10 @@ On **every** prompt submission (`before_agent_start`):
    the rest of the session — you won't be asked again for the same switch.
    If you decline, nothing changes. If the resolved model has no
    credentials, you get a warning telling you to run `/model <spec>`
-   manually instead.
+   manually instead. If the profile's `model` string can't be resolved at
+   all (typo, provider not installed), you get a one-time warning per
+   session naming the profile and the bad model string, then the session
+   continues on the current model.
 8. **Thinking level** and **active tools** are applied silently (no
    confirm) — thinking level is a low-stakes generation parameter; the
    active-tools update only happens when the merged `tools` list is
@@ -222,9 +233,11 @@ On **every** prompt submission (`before_agent_start`):
   you have no API key/OAuth for that provider. Run `/model <spec>`
   manually once credentials are configured.
 - If `ctx.models.resolve()` can't resolve your `bundles.json` model string
-  at all (typo, provider not installed), nothing happens and — with
-  `PROFILE_ROUTER_DEBUG=1` — a debug log line records `"model not
-  resolvable"`.
+  at all (typo, provider not installed), you get a warning notification
+  naming the profile and the unresolved model string (once per session per
+  model string), and the session continues on the current model. With
+  `PROFILE_ROUTER_DEBUG=1` a matching debug log line also records "model not
+  resolvable".
 
 **Malformed or missing `bundles.json`**
 - The extension never crashes the session on bad config. A parse failure
@@ -236,9 +249,9 @@ On **every** prompt submission (`before_agent_start`):
 **Known limitation**: model switching depends entirely on
 `ctx.models.resolve()` + `pi.setModel()`, both real, verified APIs (see
 `API-FINDINGS.md` §(c)) — there is no fallback-to-`/model`-only mode
-needed, unlike what an unverified scaffold might have assumed. The only
-failure mode is missing credentials, which is surfaced as a warning, not a
-silent no-op.
+needed, unlike what an unverified scaffold might have assumed. Both failure
+modes — missing credentials, and an unresolvable model string — are
+surfaced as a warning, never a silent no-op.
 
 **Debug logging**: set `PROFILE_ROUTER_DEBUG=1` in the environment OMP runs
 in. Emits `pi.logger.debug("[profile-router] ...")` lines (classification

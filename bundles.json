@@ -9,24 +9,6 @@
   },
   "profiles": [
     {
-      "name": "lookup",
-      "keywords": [
-        "find", "search", "locate", "grep", "look up", "lookup",
-        "where is", "what is", "explain", "show me", "list files", "how does"
-      ],
-      "rules": [
-        "Read-only: do not edit or write files in this profile.",
-        "Locate via grep/symbol search before opening files; avoid bulk reads.",
-        "Load summaries before full docs; load only direct dependencies.",
-        "This is retrieval, not judgment — keep answers short and cite file:line."
-      ],
-      "skills": [],
-      "tools": ["read", "grep", "glob"],
-      "disabledAgents": ["task"],
-      "model": "anthropic/claude-haiku-4-5-20251001",
-      "thinkingLevel": "low"
-    },
-    {
       "name": "architecture",
       "keywords": [
         "design", "architecture", "new module", "cross-cutting",
@@ -137,6 +119,24 @@
       ],
       "skills": ["hot-path-change-checklist"],
       "tools": ["read", "edit", "bash"],
+      "disabledAgents": ["task"],
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "thinkingLevel": "low"
+    },
+    {
+      "name": "lookup",
+      "keywords": [
+        "find", "search", "locate", "grep", "look up", "lookup",
+        "where is", "what is", "explain", "show me", "list files", "how does"
+      ],
+      "rules": [
+        "Read-only: do not edit or write files in this profile.",
+        "Locate via grep/symbol search before opening files; avoid bulk reads.",
+        "Load summaries before full docs; load only direct dependencies.",
+        "This is retrieval, not judgment — keep answers short and cite file:line."
+      ],
+      "skills": [],
+      "tools": ["read", "grep", "glob"],
       "disabledAgents": ["task"],
       "model": "anthropic/claude-haiku-4-5-20251001",
       "thinkingLevel": "low"
