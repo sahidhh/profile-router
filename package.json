@@ -1,0 +1,28 @@
+{
+  "name": "profile-router",
+  "version": "1.0.0",
+  "description": "OMP (oh-my-pi) extension that classifies prompts against bundles.json and routes rules/model/thinking-level/subagent policy per profile.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sahidhh/profile-router.git"
+  },
+  "keywords": ["omp", "oh-my-pi", "extension"],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/sahidhh/profile-router/issues"
+  },
+  "homepage": "https://github.com/sahidhh/profile-router#readme",
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "^16.4.1",
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  }
+}

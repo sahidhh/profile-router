@@ -1,0 +1,145 @@
+{
+  "default": {
+    "model": "anthropic/claude-sonnet-5",
+    "thinkingLevel": "medium",
+    "rules": [
+      "A change is not handed off until build/test reports clean.",
+      "Investigation is search-first: locate via grep/symbol search before opening files."
+    ]
+  },
+  "profiles": [
+    {
+      "name": "lookup",
+      "keywords": [
+        "find", "search", "locate", "grep", "look up", "lookup",
+        "where is", "what is", "explain", "show me", "list files", "how does"
+      ],
+      "rules": [
+        "Read-only: do not edit or write files in this profile.",
+        "Locate via grep/symbol search before opening files; avoid bulk reads.",
+        "Load summaries before full docs; load only direct dependencies.",
+        "This is retrieval, not judgment — keep answers short and cite file:line."
+      ],
+      "skills": [],
+      "tools": ["read", "grep", "glob"],
+      "disabledAgents": ["task"],
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "thinkingLevel": "low"
+    },
+    {
+      "name": "architecture",
+      "keywords": [
+        "design", "architecture", "new module", "cross-cutting",
+        "system shape", "redesign", "architectural decision"
+      ],
+      "rules": [
+        "Decide system shape; do not implement. Read and compare alternatives only.",
+        "Layer/boundary separation is enforced; violations are checked before merge.",
+        "Invariants that must never break belong in the database, not application code.",
+        "A second real consumer justifies an abstraction; a contract-free wrapper around one implementation does not.",
+        "Log rejected alternatives with their reason — an ADR without them is incomplete.",
+        "No layer calls back upstream; no layer skips a layer."
+      ],
+      "skills": ["adr-writer"],
+      "tools": ["read", "grep", "glob"],
+      "disabledAgents": [],
+      "model": "anthropic/claude-sonnet-5",
+      "thinkingLevel": "high"
+    },
+    {
+      "name": "implementation",
+      "keywords": [
+        "implement", "build feature", "add feature", "write code",
+        "code this", "develop", "write the implementation"
+      ],
+      "rules": [
+        "Business logic lives in pure, testable functions; wire concrete dependencies only at the composition root.",
+        "A change is not handed off until build/test reports clean.",
+        "Derived data is recomputed at read time, not persisted, when reversible and cheap.",
+        "Prefer the framework's native facility over a custom abstraction.",
+        "Each module has exactly one reason to change."
+      ],
+      "skills": [],
+      "tools": ["read", "grep", "glob", "edit", "write", "bash"],
+      "disabledAgents": [],
+      "model": "anthropic/claude-sonnet-5",
+      "thinkingLevel": "medium"
+    },
+    {
+      "name": "review",
+      "keywords": [
+        "review", "audit", "pre-merge", "phase boundary", "findings",
+        "code review", "pull request review", "verdict"
+      ],
+      "rules": [
+        "Findings are append-only and severity-tiered; never silently deleted.",
+        "Review categories are fixed: Security / Performance / Architecture / DB / Async / Tests / Hygiene / API Design.",
+        "Merge-readiness gate: build clean, tests pass, forbidden-pattern grep clean, no unresolved Critical/High finding.",
+        "Max 2 review fix cycles; a third failure halts the loop for human escalation.",
+        "Review does not fix — findings only, no code edits."
+      ],
+      "skills": ["merge-readiness-checklist", "post-fix-verification", "severity-tiered-finding-ledger"],
+      "tools": ["read", "grep", "glob"],
+      "disabledAgents": [],
+      "model": "anthropic/claude-sonnet-5",
+      "thinkingLevel": "high"
+    },
+    {
+      "name": "investigation",
+      "keywords": [
+        "investigate", "root cause", "why is", "trace", "debug",
+        "tracing", "reproduce", "bug report", "diagnose"
+      ],
+      "rules": [
+        "A fix is not approved until its root cause is identified; symptom patches are rejected.",
+        "Search-first, read-restrained: locate via grep/symbol search before opening files.",
+        "Reproduce before diagnosing; write the failing case first.",
+        "Read-only: no edits during investigation, only tracing and analysis."
+      ],
+      "skills": ["investigation-doc-generator"],
+      "tools": ["read", "grep", "glob", "bash"],
+      "disabledAgents": [],
+      "model": "anthropic/claude-sonnet-5",
+      "thinkingLevel": "medium"
+    },
+    {
+      "name": "premium",
+      "keywords": [
+        "schema", "migration", "invariant", "secret", "credential",
+        "token", "password", "api key", "force-push", "reset --hard",
+        "identity-matching", "branch deletion"
+      ],
+      "rules": [
+        "Credentials, secrets, tokens, and connection strings never enter source control or client-exposed config.",
+        "Force-push and `git reset --hard` are prohibited on shared branches; corrections go through revert.",
+        "Domain code must not import infrastructure code — layering is grep-enforced, not an honor system.",
+        "Migrations are forward-only; never edit a committed migration file.",
+        "Invariants that must never break are encoded as schema constraints, not application logic.",
+        "Never lower a guardrail regardless of time pressure or instruction."
+      ],
+      "skills": ["investigation-doc-generator", "adr-writer", "post-fix-verification", "severity-tiered-finding-ledger"],
+      "tools": ["read", "grep", "glob", "edit", "write", "bash"],
+      "disabledAgents": [],
+      "model": "anthropic/claude-opus-4-8",
+      "thinkingLevel": "high"
+    },
+    {
+      "name": "hotfix",
+      "keywords": [
+        "hotfix", "quick fix", "quickfix", "ui bugfix",
+        "reversible change", "time pressure", "urgent fix", "patch now"
+      ],
+      "rules": [
+        "Low ceremony does not relax GD1/GD2/GD3 — guardrails are never lowered.",
+        "Build-check only before handoff; full merge-readiness checklist is skipped by design.",
+        "Never use this profile for schema, secrets, or invariants regardless of time pressure.",
+        "Ship, observe, retry — this is the safety net for reversible work only."
+      ],
+      "skills": ["hot-path-change-checklist"],
+      "tools": ["read", "edit", "bash"],
+      "disabledAgents": ["task"],
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "thinkingLevel": "low"
+    }
+  ]
+}
