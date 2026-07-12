@@ -68,11 +68,23 @@ context.
   pins, `/profile clear` unpins, `/profile` shows scores. The status line
   (`⚙ lookup`) always shows what matched — glance at it before the model
   starts spending tokens.
+- **Discover and debug with the `/profile` subcommands:**
+  - `/profile list` — every profile with its one-line description, model, and
+    thinking level.
+  - `/profile debug on` (`off` to stop) — prints a per-prompt routing trace
+    showing which keywords each profile matched, the scores, and the winner,
+    so you can see *why* a profile was chosen. Off by default.
+  - `/profile validate` — structural check of `bundles.json` (duplicate names,
+    empty keywords, bad `thinkingLevel`/`model`) without sending a prompt.
 - **Phrase prompts with trigger vocabulary.** "summarize how auth works"
   routes to the cheap model; "investigate why auth breaks" routes to Sonnet
   with root-cause rules. The keyword table *is* the API.
-- **Edit `bundles.json`, not the extension.** It's re-read from disk on
-  every prompt — changes apply on the next prompt, no restart.
+- **Edit `bundles.json`, not the extension.** JSON is the only authoring path
+  — there is no add/edit command, by design (it's git-diffable and testable).
+  It's re-read from disk on every prompt — changes apply on the next prompt, no
+  restart. Run `/profile validate` (or `npm test`) after editing to catch
+  mistakes. Add an optional `description` to each profile for a friendly
+  `/profile list`.
 - **Run `npm test` after editing profiles.** The reachability suite fails
   if a new keyword makes one profile outrank another on its own trigger
   prompt — that's the collision safety net.

@@ -13,6 +13,7 @@
   "profiles": [
     {
       "name": "architecture",
+      "description": "Design system shape and boundaries; read and compare alternatives only, no edits.",
       "keywords": [
         "design",
         "architecture",
@@ -50,6 +51,7 @@
     },
     {
       "name": "implementation",
+      "description": "Build features and write code; full edit/write/bash toolset, build must stay green.",
       "keywords": [
         "implement",
         "build feature",
@@ -87,6 +89,7 @@
     },
     {
       "name": "review",
+      "description": "Pre-merge code review; produce severity-tiered findings only, never edit code.",
       "keywords": [
         "review",
         "audit",
@@ -126,6 +129,7 @@
     },
     {
       "name": "investigation",
+      "description": "Root-cause a bug; reproduce and trace read-only, no fixes until the cause is found.",
       "keywords": [
         "investigate",
         "root cause",
@@ -163,6 +167,7 @@
     },
     {
       "name": "premium",
+      "description": "High-stakes work (schema, secrets, invariants); top model, guardrails never lowered.",
       "keywords": [
         "schema",
         "migration",
@@ -207,6 +212,7 @@
     },
     {
       "name": "hotfix",
+      "description": "Low-ceremony reversible fix under time pressure; build-check only, no sub-agents.",
       "keywords": [
         "hotfix",
         "quick fix",
@@ -242,6 +248,7 @@
     },
     {
       "name": "lookup",
+      "description": "Find, explain, or summarize code; cheap model, read-only retrieval with citations.",
       "keywords": [
         "find",
         "search",

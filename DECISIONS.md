@@ -265,3 +265,52 @@ here. Ordered roughly by the phase in which it arose.
     primary: it fires on schema/secrets/migrations/destructive-git,
     where a wrong answer costs more than any token budget — flagged in
     `MANUAL.md` as a one-line change for operators who disagree.
+
+---
+
+## Phase 6 — profile discoverability (list / debug / validate)
+
+24. **Discoverability delivered as `/profile` subcommands, not process
+    flags.** The maintainer asked for a `--help`-style listing and a
+    `--debugger`. This extension has no argv parser — its only user surface
+    is the slash command registered via `pi.registerCommand("profile", …)`
+    — so the asks were mapped to `/profile list`, `/profile debug on|off`,
+    and `/profile validate` rather than inventing a flag layer that the OMP
+    host would never route to. Same capability, native surface.
+
+25. **Optional `description` field, display-only.** Added to the `Profile`
+    interface (and populated for all 7 shipped profiles) purely so
+    `/profile list` has a human-readable summary to show. It is never read
+    by `classify`/`scoreProfile`/`merge` — routing stays 100% keyword-driven,
+    so adding/omitting a description can never change which profile wins. The
+    reachability suite is untouched and still green, confirming no behavioral
+    coupling.
+
+26. **Debugger is a persistent session toggle, not one-shot.** Chosen with
+    the maintainer over an on-demand `/profile why <text>`. While on,
+    `before_agent_start` renders an `explain()` breakdown (matched keywords,
+    per-profile scores, chosen winner) via `ctx.ui.notify` on *every* prompt,
+    which is what "show why a profile is chosen every request" asked for. Kept
+    deliberately separate from the pre-existing `PROFILE_ROUTER_DEBUG=1` env
+    flag: that logs to `pi.logger.debug` (invisible in the UI and set before
+    launch), whereas the toggle is the interactive, in-session path. The flag
+    is session-only and never persisted to `bundles.json`.
+
+27. **Scoring refactored into a shared `scoreProfile()`; no behavior change.**
+    The per-profile keyword loop was extracted from `classify` into
+    `scoreProfile(text, profile) → { score, matched }` so both `classify`
+    (score only) and the new `explain` (score + which keywords claimed a span)
+    reuse one matcher, including the intra-profile overlap-dedup logic (F4).
+    `classify`'s return shape is unchanged, so every existing unit/reachability
+    /regression test passes as-is.
+
+28. **JSON stays the only authoring path; added `/profile validate` instead of
+    an add/edit writer.** Chosen with the maintainer. A programmatic
+    `/profile add|edit` would mutate `bundles.json` behind the user's back and
+    risk silently breaking the reachability guarantees; keeping JSON as the
+    single, git-diffable, test-guarded source of truth preserves review-as-code.
+    `/profile validate` (backed by the pure, unit-tested `validateBundles()`)
+    closes the ergonomics gap — structural checks (duplicate names, empty
+    keywords, bad `thinkingLevel`/`model`) without having to send a prompt.
+    Documented as the answer to "is JSON the only way to edit profiles?" in
+    both `README.md` and `MANUAL.md`.

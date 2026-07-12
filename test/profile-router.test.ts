@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { classify, merge, loadBundles, type Bundles, type Profile } from "../profile-router.ts";
+import { classify, merge, loadBundles, explain, validateBundles, type Bundles, type Profile } from "../profile-router.ts";
 
 // ---------- Fixtures ----------
 
@@ -200,6 +200,74 @@ describe("merge", () => {
     assert.deepEqual(cfg.matched, [{ name: "gamma", score: Number.POSITIVE_INFINITY }]);
     assert.deepEqual(cfg.rules, ["gamma-rule"]);
     assert.equal(cfg.model, "anthropic/claude-sonnet-5");
+  });
+});
+
+// ---------- explain() ----------
+
+describe("explain", () => {
+  test("returns a row for EVERY profile, including score-0 ones", () => {
+    const rows = explain("alpha-kw only", fixtureBundles);
+    assert.equal(rows.length, fixtureBundles.profiles.length);
+    const alpha = rows.find((r) => r.name === "alpha");
+    assert.equal(alpha?.score, 1);
+    assert.deepEqual(alpha?.matched, ["alpha-kw"]);
+    // beta/gamma/tie-* scored 0 but are still present.
+    assert.ok(rows.some((r) => r.name === "beta" && r.score === 0 && r.matched.length === 0));
+  });
+
+  test("sorted score-desc then declaration order; winner first", () => {
+    const rows = explain("shared-kw and beta-kw together", fixtureBundles);
+    assert.equal(rows[0]?.name, "beta");
+    assert.equal(rows[0]?.score, 2);
+    // alpha before gamma on the tie at score 1.
+    const alphaIdx = rows.findIndex((r) => r.name === "alpha");
+    const gammaIdx = rows.findIndex((r) => r.name === "gamma");
+    assert.ok(alphaIdx < gammaIdx);
+  });
+
+  test("intra-profile overlap dedup: phrase and contained keyword report once", () => {
+    const overlapBundles: Bundles = {
+      profiles: [profile({ name: "overlap-profile", keywords: ["review", "code review", "pull request review"] })],
+    };
+    const rows = explain("this pull request review needs a look", overlapBundles);
+    assert.equal(rows[0]?.score, 1);
+    assert.equal(rows[0]?.matched.length, 1);
+  });
+});
+
+// ---------- validateBundles() ----------
+
+describe("validateBundles", () => {
+  test("real bundles.json passes with no problems", () => {
+    const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+    const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+    assert.deepEqual(validateBundles(realBundles), []);
+  });
+
+  test("flags an empty keyword list", () => {
+    const bundles: Bundles = { profiles: [{ name: "x", keywords: [] }] };
+    const problems = validateBundles(bundles);
+    assert.ok(problems.some((p) => p.includes("keywords")));
+  });
+
+  test("flags duplicate profile names", () => {
+    const bundles: Bundles = {
+      profiles: [profile({ name: "dup", keywords: ["a"] }), profile({ name: "dup", keywords: ["b"] })],
+    };
+    assert.ok(validateBundles(bundles).some((p) => p.includes("duplicate")));
+  });
+
+  test("flags an unknown thinkingLevel and a malformed model", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({ name: "bad", keywords: ["a"], thinkingLevel: "ultra" }),
+        profile({ name: "badmodel", keywords: ["b"], model: 42 as never }),
+      ],
+    };
+    const problems = validateBundles(bundles);
+    assert.ok(problems.some((p) => p.includes("thinkingLevel")));
+    assert.ok(problems.some((p) => p.includes("model")));
   });
 });
 
@@ -573,5 +641,78 @@ describe("classify: intra-profile keyword overlap dedup", () => {
     const review = hits.find((h) => h.profile.name === "review");
     assert.ok(review, "review profile should still match");
     assert.equal(review?.score, 1, "code review should no longer double-count against bare review");
+  });
+});
+
+// ---------- /profile subcommands (list / debug / validate) via the full handler ----------
+
+describe("/profile list", () => {
+  test("emits one notification listing every profile name", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["a-kw"], description: "the alpha profile" }),
+          profile({ name: "beta", keywords: ["b-kw"] }),
+        ],
+      });
+      const { commands, notifications, ctx } = await installExtension(dir);
+      await commands["profile"]!.handler("list", ctx);
+      assert.equal(notifications.length, 1);
+      const msg = notifications[0]!.msg;
+      assert.ok(msg.includes("alpha") && msg.includes("beta"), "lists both profiles");
+      assert.ok(msg.includes("the alpha profile"), "shows the description when present");
+      assert.ok(msg.includes("keywords: b-kw"), "falls back to keywords when no description");
+    });
+  });
+});
+
+describe("/profile debug toggle", () => {
+  test("on -> a prompt emits a routing trace naming the winner; off -> no trace", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "winner", keywords: ["win-kw"] }),
+          profile({ name: "other", keywords: ["other-kw"] }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      await commands["profile"]!.handler("debug on", ctx);
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "win-kw please", systemPrompt: [] }, ctx);
+      const trace = notifications.find((n) => n.level === "info" && n.msg.includes("Profile routing"));
+      assert.ok(trace, "a routing trace should fire while debug is on");
+      assert.ok(trace!.msg.includes("winner"), "trace names the chosen profile");
+      assert.ok(trace!.msg.includes("win-kw"), "trace shows the matched keyword");
+
+      await commands["profile"]!.handler("debug off", ctx);
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "win-kw again", systemPrompt: [] }, ctx);
+      assert.equal(
+        notifications.filter((n) => n.msg.includes("Profile routing")).length,
+        0,
+        "no trace once debug is off",
+      );
+    });
+  });
+});
+
+describe("/profile validate", () => {
+  test("reports valid for a well-formed bundles.json", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "ok", keywords: ["k"] })] });
+      const { commands, notifications, ctx } = await installExtension(dir);
+      await commands["profile"]!.handler("validate", ctx);
+      assert.ok(notifications.some((n) => n.level === "info" && n.msg.includes("valid")));
+    });
+  });
+
+  test("reports problems for a malformed profile", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "bad", keywords: [] })] });
+      const { commands, notifications, ctx } = await installExtension(dir);
+      await commands["profile"]!.handler("validate", ctx);
+      assert.ok(notifications.some((n) => n.level === "warning" && n.msg.includes("keywords")));
+    });
   });
 });

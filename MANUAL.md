@@ -57,6 +57,7 @@ Steps:
   "profiles": [
     {
       "name": "unique-name",       // shown in status line and /profile
+      "description": "one-liner",  // optional; human summary shown by /profile list (never affects routing)
       "keywords": ["..."],         // word-boundary, case-insensitive; multi-word phrases OK ("root cause")
       "rules": ["..."],            // terse imperatives, injected into system prompt
       "skills": ["..."],           // informational — surfaced as a "Recommended Skills" hint block
@@ -234,10 +235,30 @@ On **every** prompt submission (`before_agent_start`):
   from `bundles.json` (helps catch typos immediately, never silently no-ops).
 - `/profile clear` — remove the pin and resume automatic keyword
   classification on the next prompt.
+- `/profile list` — list every profile loaded from `bundles.json` with its
+  `description` (or, if none, its keywords), model, and thinking level. The
+  quickest way to see what's available.
+- `/profile debug [on|off]` — toggle a per-prompt routing trace. While on,
+  each prompt emits an `info` notification showing which keywords each profile
+  matched, the per-profile scores, and the chosen winner (or a note when a
+  manual pin bypassed classification, or when nothing matched and `default`
+  applied). Bare `/profile debug` flips the current state. Off by default; the
+  session-only flag never persists to disk. Distinct from the
+  `PROFILE_ROUTER_DEBUG=1` env var, which logs to the host logger instead of
+  the UI.
+- `/profile validate` — structural check of the loaded `bundles.json`:
+  duplicate profile names, missing/empty `keywords`, unknown `thinkingLevel`,
+  and malformed `model`. Reports `✓ valid` or an itemized list of problems —
+  no prompt needed.
 
 ---
 
 ## 5. Adding or editing a profile safely
+
+**JSON is the only authoring path.** There is no `/profile add` / `/profile edit`
+command by design — `bundles.json` is git-diffable and guarded by the test suite,
+so profiles are edited as JSON and reviewed like code. Use `/profile validate`
+(and `npm test`) to check your edits.
 
 1. Add/edit an entry in `bundles.json`'s `profiles` array. Keep `rules` to
    3–10 terse imperatives — every matched profile's rules get unioned into
