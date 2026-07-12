@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Profile Router Bundles Configuration",
+  "description": "Schema for bundles.json - profile configuration for Claude Code's profile router.",
+  "type": "object",
+  "required": ["profiles"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema URI (optional)"
+    },
+    "profiles": {
+      "type": "array",
+      "description": "Array of profile configurations. Declaration order determines tiebreak order when multiple profiles match.",
+      "items": { "$ref": "#/definitions/profile" }
+    },
+    "default": {
+      "description": "Default profile configuration applied to all matches. Uses the same field definitions as a profile, but without required name/keywords.",
+      "$ref": "#/definitions/profileDefaults"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "profile": {
+      "type": "object",
+      "required": ["name", "keywords"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique profile identifier."
+        },
+        "keywords": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Classifier terms used to auto-match profiles via keyword matching. An empty array denotes a 'class build' that is only reachable via manual override (/equip), never auto-matched."
+        },
+        "rules": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Rules injected into the system prompt. Union merge across matched profiles."
+        },
+        "skills": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Skill names to enable. Union merge across matched profiles. Soft recommendation: keep ≤ 8 skills (the 'Deck' limit), though this is not enforced."
+        },
+        "tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tool names to enable. Union merge across matched profiles."
+        },
+        "disabledAgents": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Agent names to disable. Intersection merge across matched profiles (a tool must be disabled by all matched profiles to be blocked)."
+        },
+        "disabledTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tool names or glob patterns (e.g., 'mcp__*') to disable. Union merge across matched profiles (any matched profile can block a tool, making it a hard block). The Sentinel oath: restrictive by design."
+        },
+        "maxMinions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cap on live 'task' subagents (the Monarch summon cap). Takes the MIN value across matched profiles."
+        },
+        "noConfirm": {
+          "type": "boolean",
+          "description": "Auto-accept model switches without a confirm dialog (the Berserker flag). OR merge across matched profiles."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model to use, in the form 'provider/id' (e.g., 'anthropic/claude-sonnet-5'). Single-value: highest score wins when multiple profiles match."
+        },
+        "thinkingLevel": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "Extended thinking level. Single-value: highest score wins when multiple profiles match."
+        }
+      },
+      "additionalProperties": false
+    },
+    "profileDefaults": {
+      "type": "object",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Rules injected into the system prompt. Union merge across matched profiles."
+        },
+        "skills": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Skill names to enable. Union merge across matched profiles. Soft recommendation: keep ≤ 8 skills (the 'Deck' limit), though this is not enforced."
+        },
+        "tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tool names to enable. Union merge across matched profiles."
+        },
+        "disabledAgents": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Agent names to disable. Intersection merge across matched profiles."
+        },
+        "disabledTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tool names or glob patterns (e.g., 'mcp__*') to disable. Union merge across matched profiles."
+        },
+        "maxMinions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cap on live 'task' subagents. Takes the MIN value across matched profiles."
+        },
+        "noConfirm": {
+          "type": "boolean",
+          "description": "Auto-accept model switches without a confirm dialog. OR merge across matched profiles."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model to use, in the form 'provider/id' (e.g., 'anthropic/claude-sonnet-5'). Single-value: highest score wins when multiple profiles match."
+        },
+        "thinkingLevel": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "Extended thinking level. Single-value: highest score wins when multiple profiles match."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
