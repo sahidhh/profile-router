@@ -24,6 +24,7 @@ import * as os from "node:os";
 
 export interface Profile {
   name: string;
+  description?: string;         // one-line human summary (display only; never affects classification)
   keywords: string[];          // classifier terms
   rules?: string[];            // injected into system prompt
   skills?: string[];           // union
@@ -79,38 +80,65 @@ export function loadBundles(cwd: string, notify?: (msg: string) => void): Bundle
 
 // ---------- Classification (keyword scoring, word-boundary matching) ----------
 
+/**
+ * Score a single profile against already-lowercased prompt text.
+ * Records WHICH keywords claimed a span (not just the count) so the same logic
+ * powers both classify() (score only) and explain() (score + matched keywords).
+ */
+export function scoreProfile(text: string, profile: Profile): { score: number; matched: string[] } {
+  // Claimed text spans, so a longer phrase (e.g. "code review") and a shorter
+  // keyword it contains (e.g. "review") can't both score off the same words.
+  const claimed: [number, number][] = [];
+  const overlapsClaimed = (start: number, end: number) => claimed.some(([s, e]) => start < e && s < end);
+  const matched: string[] = [];
+
+  const byLengthDesc = [...profile.keywords].sort((a, b) => b.length - a.length);
+  for (const kw of byLengthDesc) {
+    // Word-boundary match beats naive substring ("fix" shouldn't hit "prefix").
+    const re = new RegExp(`\\b${kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (!overlapsClaimed(start, end)) {
+        claimed.push([start, end]);
+        matched.push(kw);
+        break;
+      }
+    }
+  }
+  return { score: matched.length, matched };
+}
+
 export function classify(prompt: string, bundles: Bundles): { profile: Profile; score: number }[] {
   const text = prompt.toLowerCase();
   const hits: { profile: Profile; score: number; order: number }[] = [];
 
   bundles.profiles.forEach((profile, order) => {
-    let score = 0;
-    // Claimed text spans, so a longer phrase (e.g. "code review") and a shorter
-    // keyword it contains (e.g. "review") can't both score off the same words.
-    const claimed: [number, number][] = [];
-    const overlapsClaimed = (start: number, end: number) => claimed.some(([s, e]) => start < e && s < end);
-
-    const byLengthDesc = [...profile.keywords].sort((a, b) => b.length - a.length);
-    for (const kw of byLengthDesc) {
-      // Word-boundary match beats naive substring ("fix" shouldn't hit "prefix").
-      const re = new RegExp(`\\b${kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g");
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(text))) {
-        const start = m.index;
-        const end = start + m[0].length;
-        if (!overlapsClaimed(start, end)) {
-          claimed.push([start, end]);
-          score += 1;
-          break;
-        }
-      }
-    }
+    const { score } = scoreProfile(text, profile);
     if (score > 0) hits.push({ profile, score, order });
   });
 
   // Sort: score desc, then declaration order asc (tiebreak rule)
   hits.sort((a, b) => b.score - a.score || a.order - b.order);
   return hits.map(({ profile, score }) => ({ profile, score }));
+}
+
+/**
+ * Explain how a prompt classifies against EVERY profile (including score 0),
+ * sorted score-desc then declaration order. Powers the /profile debug trace.
+ */
+export function explain(
+  prompt: string,
+  bundles: Bundles,
+): { name: string; score: number; matched: string[]; order: number }[] {
+  const text = prompt.toLowerCase();
+  const rows = bundles.profiles.map((profile, order) => {
+    const { score, matched } = scoreProfile(text, profile);
+    return { name: profile.name, score, matched, order };
+  });
+  rows.sort((a, b) => b.score - a.score || a.order - b.order);
+  return rows;
 }
 
 // ---------- Merge (union / intersection / highest-score) ----------
@@ -165,11 +193,47 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
   return cfg;
 }
 
+// ---------- Validation (structural checks for /profile validate) ----------
+
+const VALID_THINKING_LEVELS = ["off", "low", "medium", "high"];
+
+/** Returns a list of human-readable problems; empty list means the bundles are valid. */
+export function validateBundles(bundles: Bundles): string[] {
+  const problems: string[] = [];
+  const seen = new Set<string>();
+
+  bundles.profiles.forEach((p, i) => {
+    const label = p.name ? `"${p.name}"` : `profile #${i + 1}`;
+    if (!p.name || !p.name.trim()) {
+      problems.push(`${label}: missing or empty "name"`);
+    } else if (seen.has(p.name)) {
+      problems.push(`duplicate profile name "${p.name}"`);
+    } else {
+      seen.add(p.name);
+    }
+    if (!Array.isArray(p.keywords) || p.keywords.length === 0) {
+      problems.push(`${label}: "keywords" must be a non-empty array`);
+    }
+    if (p.thinkingLevel !== undefined && !VALID_THINKING_LEVELS.includes(p.thinkingLevel)) {
+      problems.push(`${label}: thinkingLevel "${p.thinkingLevel}" is not one of ${VALID_THINKING_LEVELS.join("/")}`);
+    }
+    if (
+      p.model !== undefined &&
+      !(typeof p.model === "string" || (Array.isArray(p.model) && p.model.every((m) => typeof m === "string")))
+    ) {
+      problems.push(`${label}: "model" must be a string or an array of strings`);
+    }
+  });
+
+  return problems;
+}
+
 // ---------- Extension ----------
 
 export default function (pi: ExtensionAPI) {
   let active: MergedConfig | null = null;
   let manualOverride: string | null = null;        // set via /profile <name>
+  let debugTrace = false;                          // toggled via /profile debug on|off
   const modelDecisions = new Map<string, boolean>(); // "from→to" -> user's answer, for this session
   const unresolvedModelWarned = new Set<string>();   // model strings already warned about this session
 
@@ -202,6 +266,28 @@ export default function (pi: ExtensionAPI) {
     active = next;
 
     debugLog("classified", { prompt: event.prompt.slice(0, 80), matched: next.matched });
+
+    // ---- Debug trace: explain WHY this prompt routed where it did (toggled via /profile debug) ----
+    if (debugTrace) {
+      const lines: string[] = [`🔎 Profile routing for "${event.prompt.slice(0, 60)}${event.prompt.length > 60 ? "…" : ""}"`];
+      if (overrideApplied) {
+        lines.push(`  → ${manualOverride} (manual pin — classification bypassed)`);
+      } else {
+        const rows = explain(event.prompt, bundles);
+        const scored = rows.filter((r) => r.score > 0);
+        if (scored.length === 0) {
+          lines.push("  → default (no keywords matched)");
+        } else {
+          scored.forEach((r, i) => {
+            const mark = i === 0 ? "→" : " ";
+            lines.push(`  ${mark} ${r.name}: ${r.score}  [${r.matched.join(", ")}]${i === 0 ? "  ← chosen" : ""}`);
+          });
+        }
+        const zero = rows.length - scored.length;
+        if (zero > 0) lines.push(`  (${zero} other profile${zero === 1 ? "" : "s"} scored 0)`);
+      }
+      ctx.ui.notify(lines.join("\n"), "info");
+    }
 
     // Status line: ALWAYS visible so misclassification is caught before damage.
     ctx.ui.setStatus(
@@ -298,16 +384,65 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  const modelStr = (m?: string | string[]) => (m ? (Array.isArray(m) ? m.join(" → ") : m) : "unset");
+
   // ---- Manual override + status ----
   pi.registerCommand("profile", {
-    description: "Show active profile, or override: /profile <name> | /profile clear",
+    description:
+      "Status/override: /profile [<name>|clear] | list | debug [on|off] | validate",
     handler: async (args, ctx) => {
       const arg = (args ?? "").trim();
+      const [sub, ...rest] = arg.split(/\s+/);
+
       if (arg === "clear") {
         manualOverride = null;
         ctx.ui.notify("Profile override cleared — auto-classification resumed", "info");
         return;
       }
+
+      // ---- /profile list : every profile with its one-line summary ----
+      if (sub === "list") {
+        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+        if (bundles.profiles.length === 0) {
+          ctx.ui.notify("No profiles loaded (bundles.json missing, empty, or malformed).", "warning");
+          return;
+        }
+        const lines = bundles.profiles.map((p) => {
+          const summary = p.description ?? `keywords: ${p.keywords.join(", ")}`;
+          return `• ${p.name} — ${summary}\n    model: ${modelStr(p.model)} | thinking: ${p.thinkingLevel ?? "unset"}`;
+        });
+        const def = bundles.default
+          ? `\ndefault (no match) → model: ${modelStr(bundles.default.model)} | thinking: ${bundles.default.thinkingLevel ?? "unset"}`
+          : "";
+        ctx.ui.notify(`Profiles (${bundles.profiles.length}):\n${lines.join("\n")}${def}`, "info");
+        return;
+      }
+
+      // ---- /profile debug [on|off] : toggle the per-request routing trace ----
+      if (sub === "debug") {
+        const mode = (rest[0] ?? "").toLowerCase();
+        if (mode === "on") debugTrace = true;
+        else if (mode === "off") debugTrace = false;
+        else debugTrace = !debugTrace; // bare `/profile debug` toggles
+        ctx.ui.notify(
+          `Profile debug trace ${debugTrace ? "ON — each prompt will show why a profile is chosen" : "OFF"}`,
+          "info",
+        );
+        return;
+      }
+
+      // ---- /profile validate : structural check of bundles.json ----
+      if (sub === "validate") {
+        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+        const problems = validateBundles(bundles);
+        if (problems.length === 0) {
+          ctx.ui.notify(`✓ bundles.json valid (${bundles.profiles.length} profile${bundles.profiles.length === 1 ? "" : "s"})`, "info");
+        } else {
+          ctx.ui.notify(`✗ bundles.json has ${problems.length} problem${problems.length === 1 ? "" : "s"}:\n${problems.map((p) => `  - ${p}`).join("\n")}`, "warning");
+        }
+        return;
+      }
+
       if (arg) {
         const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
         if (!bundles.profiles.some((p) => p.name === arg)) {
@@ -321,7 +456,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(
         active
           ? `Active: ${active.matched.map((m) => `${m.name}(${m.score})`).join(", ") || "default"}\n` +
-              `Model: ${active.model ? (Array.isArray(active.model) ? active.model.join(" → ") : active.model) : "unset"} | Thinking: ${active.thinkingLevel ?? "unset"} | Disabled agents: ${active.disabledAgents.join(", ") || "none"}`
+              `Model: ${modelStr(active.model)} | Thinking: ${active.thinkingLevel ?? "unset"} | Disabled agents: ${active.disabledAgents.join(", ") || "none"}`
           : "No classification yet — send a prompt first",
         "info",
       );
