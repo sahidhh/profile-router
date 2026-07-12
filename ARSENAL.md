@@ -47,14 +47,15 @@ equipped deliberately via `/equip <name>`.
   *"Your army is at its limit, Monarch."*
 - 🩸 **Poison** — ✅ `credential_disabled` sets a persistent `☠ fallback`
   marker so you never unknowingly run on the backup model.
-- 🗡 **Shadow Extraction (`/arise`)** — ✅ Distill one battle-learned rule, approve
-  it, append it to a profile in `bundles.json`. The rule library grows from
-  experience, not upfront speculation. One rule per extraction, manual
-  approval always.
+- 🗡 **Shadow Extraction (`/arise`)** — ✅ `/arise [profile]` asks the model to
+  distill one rule and **auto-captures** its answer (via `message_end`) for
+  your approval; `/arise <profile> <rule>` persists one directly. The rule
+  library grows from experience. One rule per extraction, manual approval always.
 - 🃏 **The Deck** — ✅ (discipline) Keep each build's `skills` ≤ 8 — every loaded
   skill costs context tokens, so deck-building is token budgeting.
-- 🏆 **Hunter Rank (`/rank`)** — ✅ In-session tracker: gates cleared per class,
-  bosses (high-thinking gates) fought. Pure flavor, resets each session.
+- 🏆 **Hunter Rank (`/rank`)** — ✅ **Persistent** tracker (`hunter-rank.json`):
+  gates cleared per class, bosses (high-thinking gates) fought, bonfires
+  (commits) lit. Survives across sessions.
 - 🩸 **Bleed** (context-fill meter) — ⏸ No live token/context-size read surface.
 - ⚡ **Elixir** (rate-limit headroom) — ⏸ Rate-limit state is only observable
   reactively on a 429; no headroom read.

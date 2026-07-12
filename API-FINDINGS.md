@@ -263,14 +263,30 @@ from an extension, not hook-only — and every handler receives
   carries the same. Summons are hard-reset per gate in `before_agent_start`
   so a missed end-event cannot leak.
 
-**🗡 /arise — `sendUserMessage`** (`types.ts:1127-1131`):
-`sendUserMessage(content: string | (TextContent|ImageContent)[], options?: { deliverAs?: "steer"|"followUp" }): void`
-— documented *"Send a user prompt: idle starts a turn; streaming queues as
-steer unless deliverAs is set."* Used with `deliverAs: "followUp"` to ask the
-current model to distill a rule. Persistence is a plain `fs.writeFileSync`
-back to the resolved `bundles.json` path (`resolveBundlesPath`), gated on
-`ctx.ui.confirm` — no special API needed. The command context type is the
-real `ExtensionCommandContext` (`types.ts:403`, extends `ExtensionContext`).
+**🗡 /arise — `sendUserMessage` + `message_end`** (`types.ts:1127-1131`,
+`:590-593`): `sendUserMessage(content, options?: { deliverAs?: "steer"|"followUp" })`
+asks the current model to distill a rule (`deliverAs: "followUp"`).
+Auto-capture reads the model's answer from `MessageEndEvent.message`
+(`types.ts:590`): an `AssistantMessage` (`pi-ai/src/types.ts:723`) whose
+`content` is `(TextContent | ThinkingContent | … | ToolCall)[]`; the handler
+takes `content` blocks of `type: "text"` (`pi-ai/src/types.ts:598`) and skips
+turns that contain any non-text/thinking block (i.e. tool calls) so it only
+captures a terminal answer. Persistence is a plain `fs.writeFileSync` back to
+the resolved `bundles.json` (`resolveBundlesPath`), gated on `ctx.ui.confirm`.
+The command context type is the real `ExtensionCommandContext` (`types.ts:403`).
+
+**🏆 Hunter Rank — `bash` command inspection.** Bonfires are counted from
+`BashToolInput.command: string` (`src/tools/bash.ts:156`) matching
+`/\bgit\s+commit\b/` in the `tool_call` handler; gates/bosses come from the
+`before_agent_start` classification. Persisted to `hunter-rank.json` beside
+the resolved `bundles.json`.
+
+**Committed integration coverage.** `test/integration/real-loader.integration.ts`
+loads the extension through the package's real `loadExtensionFromFactory`
+(exported at `@oh-my-pi/pi-coding-agent/extensibility/extensions/loader` per
+the package `exports` map) + `ConcreteExtensionAPI`, and drives all of the
+above (21 assertions, `bun`). It replaces the manual smoke test below for
+everything except the live provider loop, which still needs credentials.
 
 **Not built — no read surface exists.** *Bleed* would need a live token /
 context-size read and *Elixir* a rate-limit-headroom read; neither is exposed

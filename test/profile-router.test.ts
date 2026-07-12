@@ -694,33 +694,112 @@ describe("🗡 Berserker: noConfirm auto-accepts model switches", () => {
 });
 
 describe("🗡 /arise: Shadow Extraction persists one approved rule", () => {
-  test("appends a distilled rule to the named profile in bundles.json after confirm", async () => {
+  test("Form B: /arise <profile> <rule> appends directly after confirm, with dedup", async () => {
     await withTempProjectDir(async (dir) => {
       writeBundles(dir, { profiles: [profile({ name: "implementation", keywords: ["impl-kw"], rules: ["existing-rule"] })] });
       const { commands, ctx } = await installExtension(dir);
 
-      // /arise with no args asks the model to distill (sends a followUp message).
-      await commands["arise"]!.handler("", ctx);
-
-      // /arise <profile> <rule> persists it.
       await commands["arise"]!.handler('implementation Prefer the framework native facility.', ctx);
       const written = JSON.parse(fs.readFileSync(path.join(dir, ".omp", "bundles.json"), "utf-8")) as Bundles;
-      const impl = written.profiles.find((p) => p.name === "implementation")!;
-      assert.deepEqual(impl.rules, ["existing-rule", "Prefer the framework native facility."]);
+      assert.deepEqual(written.profiles.find((p) => p.name === "implementation")!.rules, [
+        "existing-rule",
+        "Prefer the framework native facility.",
+      ]);
 
-      // Re-arising the same rule is a no-op (dedup), so the file is unchanged.
+      // Re-arising the same rule is a no-op (dedup).
       await commands["arise"]!.handler('implementation Prefer the framework native facility.', ctx);
       const again = JSON.parse(fs.readFileSync(path.join(dir, ".omp", "bundles.json"), "utf-8")) as Bundles;
       assert.equal(again.profiles.find((p) => p.name === "implementation")!.rules!.length, 2, "dedup: no duplicate rule");
     });
   });
 
-  test("/arise into an unknown profile errors and writes nothing", async () => {
+  test("Form A: /arise <profile> arms capture; the model's next terminal answer is auto-persisted", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "implementation", keywords: ["impl-kw"] })] });
+      const { handlers, commands, sentMessages, ctx } = await installExtension(dir);
+
+      // Arm: asks the model (followUp) and records the target profile.
+      await commands["arise"]!.handler("implementation", ctx);
+      assert.equal(sentMessages.length, 1, "must send the distill prompt");
+      assert.equal((sentMessages[0]!.options as { deliverAs?: string })?.deliverAs, "followUp");
+
+      // A tool-calling turn must NOT be captured (wait for the terminal text answer).
+      await handlers["message_end"]!(
+        { message: { role: "assistant", content: [{ type: "text", text: "let me look" }, { type: "tool_call" }] } },
+        ctx,
+      );
+      let written = JSON.parse(fs.readFileSync(path.join(dir, ".omp", "bundles.json"), "utf-8")) as Bundles;
+      assert.deepEqual(written.profiles.find((p) => p.name === "implementation")!.rules, [], "tool turn not captured");
+
+      // The terminal text answer is captured and persisted (first line only).
+      await handlers["message_end"]!(
+        { message: { role: "assistant", content: [{ type: "text", text: "Recompute derived data at read time.\nextra prose" }] } },
+        ctx,
+      );
+      written = JSON.parse(fs.readFileSync(path.join(dir, ".omp", "bundles.json"), "utf-8")) as Bundles;
+      assert.deepEqual(written.profiles.find((p) => p.name === "implementation")!.rules, ["Recompute derived data at read time."]);
+
+      // One-shot: a subsequent assistant message is NOT captured again.
+      await handlers["message_end"]!({ message: { role: "assistant", content: [{ type: "text", text: "Another sentence." }] } }, ctx);
+      written = JSON.parse(fs.readFileSync(path.join(dir, ".omp", "bundles.json"), "utf-8")) as Bundles;
+      assert.equal(written.profiles.find((p) => p.name === "implementation")!.rules!.length, 1, "capture is one-shot");
+    });
+  });
+
+  test("/arise <unknown> as an arm target errors and arms nothing", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "implementation", keywords: ["impl-kw"] })] });
+      const { handlers, commands, notifications, sentMessages, ctx } = await installExtension(dir);
+      await commands["arise"]!.handler("nonesuch", ctx);
+      assert.ok(notifications.some((n) => n.level === "error" && n.msg.includes("nonesuch")), "must error on unknown profile");
+      assert.equal(sentMessages.length, 0, "must not ask the model when the target is invalid");
+      // No capture armed -> a later assistant message writes nothing.
+      await handlers["message_end"]!({ message: { role: "assistant", content: [{ type: "text", text: "x" }] } }, ctx);
+      assert.equal(fs.existsSync(path.join(dir, ".omp", "bundles.json")), true);
+    });
+  });
+
+  test("/arise <profile> <rule> into an unknown profile errors and writes nothing", async () => {
     await withTempProjectDir(async (dir) => {
       writeBundles(dir, { profiles: [profile({ name: "implementation", keywords: ["impl-kw"] })] });
       const { commands, notifications, ctx } = await installExtension(dir);
       await commands["arise"]!.handler("nonesuch some rule text", ctx);
       assert.ok(notifications.some((n) => n.level === "error" && n.msg.includes("nonesuch")), "must error on unknown profile");
+    });
+  });
+});
+
+describe("🏆 Hunter Rank: persistent across sessions", () => {
+  test("gates, bosses, and bonfires accumulate to hunter-rank.json and survive a reinstall", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "premium", keywords: ["prem-kw"], thinkingLevel: "high" })],
+      });
+
+      // Session 1: two gates (a high-thinking boss each) + one commit bonfire.
+      {
+        const { handlers, ctx } = await installExtension(dir);
+        await handlers["before_agent_start"]!({ prompt: "prem-kw one", systemPrompt: [] }, ctx);
+        await handlers["before_agent_start"]!({ prompt: "prem-kw two", systemPrompt: [] }, ctx);
+        await handlers["tool_call"]!({ toolName: "bash", input: { command: "git commit -m x" } }, ctx);
+      }
+
+      const statsPath = path.join(dir, ".omp", "hunter-rank.json");
+      const s1 = JSON.parse(fs.readFileSync(statsPath, "utf-8"));
+      assert.equal(s1.gates["premium"], 2);
+      assert.equal(s1.bosses, 2);
+      assert.equal(s1.bonfires, 1);
+
+      // Session 2 (fresh install = fresh in-memory state): stats keep accumulating from disk.
+      {
+        const { handlers, commands, notifications, ctx } = await installExtension(dir);
+        await handlers["before_agent_start"]!({ prompt: "prem-kw three", systemPrompt: [] }, ctx);
+        await commands["rank"]!.handler("", ctx);
+        assert.ok(
+          notifications.some((n) => n.msg.includes("3 gates") && n.msg.includes("3 bosses") && n.msg.includes("1 bonfire")),
+          `rank card should reflect accumulated stats, got: ${notifications.map((n) => n.msg).join(" | ")}`,
+        );
+      }
     });
   });
 });

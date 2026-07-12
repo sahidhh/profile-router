@@ -111,3 +111,7 @@ dist
 
 # TernJS port file
 .tern-port
+
+# profile-router: generated Hunter Rank stats (per-install, next to bundles.json)
+hunter-rank.json
+.omp/hunter-rank.json

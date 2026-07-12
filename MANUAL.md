@@ -206,14 +206,18 @@ Two out-of-band hooks fire independently of the per-prompt flow:
   classification on the next prompt.
 - `/equip <name>` / `/equip clear` — flavored alias of `/profile` for
   equipping class builds (see §8). Same machinery.
-- `/arise` — Shadow Extraction. With no args, asks the current model to
-  distill exactly **one** reusable rule from the session (sent as a follow-up
-  prompt). Then `/arise <profile> <rule text>` shows the rule, asks you to
-  confirm, and on approval appends it to that profile's `rules` in
-  `bundles.json` (deduped; one rule per extraction; manual approval always).
-- `/rank` — Hunter Rank card for this session: gates cleared per class,
-  bosses (high/max-thinking gates) fought, and any active poison. In-session
-  only; resets when the session restarts.
+- `/arise` — Shadow Extraction (two forms):
+  - **`/arise [profile]`** — asks the model to distill exactly **one** reusable
+    rule (follow-up prompt), then **auto-captures** its next terminal answer:
+    you get a confirm dialog with the distilled rule, and on approval it's
+    appended to `profile`'s `rules`. With no `profile`, the currently active
+    profile is the target. `/arise clear` disarms a pending capture.
+  - **`/arise <profile> <rule text>`** — persist a rule you already have,
+    directly (same confirm + dedup).
+  - Always: manual approval, one rule per extraction, deduped.
+- `/rank` — Hunter Rank card: gates cleared per class, bosses (high/max-thinking
+  gates) fought, bonfires (git commits) lit, and any active poison.
+  **Persists across sessions** in `hunter-rank.json` next to your `bundles.json`.
 
 ---
 
@@ -363,12 +367,25 @@ Class mechanics you'll see at runtime:
   an `⚔ Berserker: switching…` notice instead).
 
 **🗡 Shadow Extraction (`/arise`)** grows a profile's rule library from actual
-experience instead of upfront speculation: after a hard session, `/arise`
-asks the model to distill one reusable rule, and `/arise <profile> <rule>`
-appends it to `bundles.json` after you approve it. One rule per extraction,
-manual approval always.
+experience instead of upfront speculation: after a hard session, `/arise
+[profile]` asks the model to distill one reusable rule and **auto-captures**
+its answer for your approval (via a `message_end` listener); `/arise <profile>
+<rule>` persists a rule you already have. One rule per extraction, manual
+approval always.
+
+**🏆 Hunter Rank (`/rank`)** persists to `hunter-rank.json` beside your
+`bundles.json` — gates per class, bosses fought, bonfires (commits) lit. Add
+`hunter-rank.json` to your `.gitignore` if `bundles.json` lives in your repo
+(this project's `.gitignore` already does).
 
 **Deferred by design** (honesty): *Bleed* (a context-fill meter) and *Elixir*
 (a free-tier rate-limit meter) are **not** built — OMP exposes no token-count
 or rate-limit-headroom read surface to an extension (only reactive 429s), so
 a meter would be guesswork. See `DECISIONS.md`.
+
+**Verification**: `npm run check` runs typecheck + the Node unit/handler suite.
+`npm run test:integration` (needs `bun`) additionally loads the extension
+through OMP's **real** `loadExtensionFromFactory` + `ConcreteExtensionAPI` and
+drives every mechanic — see `test/integration/real-loader.integration.ts`. The
+only unexercised seam is the live provider call (needs credentials): run the
+§7–§8 checks by hand in a real `omp` session.

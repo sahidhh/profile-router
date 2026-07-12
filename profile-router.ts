@@ -15,7 +15,7 @@
  * All API usage below is verified against the installed @oh-my-pi/pi-coding-agent
  * source/types (v16.4.1) — see API-FINDINGS.md for file:line evidence.
  */
-import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -94,6 +94,45 @@ export function resolveBundlesPath(cwd: string): string {
   if (fs.existsSync(project)) return project;
   if (fs.existsSync(global)) return global;
   return project;
+}
+
+// ---------- Hunter Rank (persistent, flavor) ----------
+
+export interface RankStats {
+  gates: Record<string, number>; // prompts routed, per class/profile label
+  bosses: number;                // high/max-thinking gates entered
+  bonfires: number;              // git commits observed
+  updated: string;               // ISO timestamp of last write
+}
+
+/** Rank stats live next to the resolved bundles.json (project `.omp/` or global `~/.omp/`). */
+export function rankStatsPath(cwd: string): string {
+  return path.join(path.dirname(resolveBundlesPath(cwd)), "hunter-rank.json");
+}
+
+export function loadRankStats(cwd: string): RankStats {
+  try {
+    const p = JSON.parse(fs.readFileSync(rankStatsPath(cwd), "utf-8")) as Partial<RankStats>;
+    return {
+      gates: p.gates && typeof p.gates === "object" ? p.gates : {},
+      bosses: typeof p.bosses === "number" ? p.bosses : 0,
+      bonfires: typeof p.bonfires === "number" ? p.bonfires : 0,
+      updated: typeof p.updated === "string" ? p.updated : "",
+    };
+  } catch {
+    return { gates: {}, bosses: 0, bonfires: 0, updated: "" };
+  }
+}
+
+/** Best-effort persistence — rank flavor must never break a gate, so all IO failures are swallowed. */
+export function saveRankStats(cwd: string, stats: RankStats): void {
+  try {
+    const file = rankStatsPath(cwd);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ ...stats, updated: new Date().toISOString() }, null, 2) + "\n", "utf-8");
+  } catch {
+    /* swallow: stats are cosmetic */
+  }
 }
 
 // ---------- Classification (keyword scoring, word-boundary matching) ----------
@@ -206,8 +245,7 @@ export default function (pi: ExtensionAPI) {
   const unresolvedModelWarned = new Set<string>();   // model strings already warned about this session
   const poisonedProviders = new Set<string>();       // providers whose credential got soft-disabled → running on fallback
   let liveSummons = 0;                               // in-flight `task` subagents this gate (Monarch summon cap)
-  const gatesCleared = new Map<string, number>();    // Hunter Rank: prompts routed, per class/profile label
-  let bossesFought = 0;                              // Hunter Rank: high/max-thinking gates entered
+  let awaitingShadow: { profile: string } | null = null; // /arise: armed to capture the model's next distilled rule
 
   const debugLog = (msg: string, context?: Record<string, unknown>) => {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
@@ -240,10 +278,12 @@ export default function (pi: ExtensionAPI) {
     // A new gate: the previous gate's summons are dismissed. Reset before enforcing the cap.
     liveSummons = 0;
 
-    // Hunter Rank (in-session, flavor): tally which class/profile cleared this gate.
+    // Hunter Rank (persistent, flavor): tally which class/profile cleared this gate.
     const rankLabel = next.matched.map((m) => m.name).join("+") || "default";
-    gatesCleared.set(rankLabel, (gatesCleared.get(rankLabel) ?? 0) + 1);
-    if (next.thinkingLevel === "high" || next.thinkingLevel === "xhigh" || next.thinkingLevel === "max") bossesFought += 1;
+    const stats = loadRankStats(ctx.cwd);
+    stats.gates[rankLabel] = (stats.gates[rankLabel] ?? 0) + 1;
+    if (next.thinkingLevel === "high" || next.thinkingLevel === "xhigh" || next.thinkingLevel === "max") stats.bosses += 1;
+    saveRankStats(ctx.cwd, stats);
 
     debugLog("classified", { prompt: event.prompt.slice(0, 80), matched: next.matched });
 
@@ -322,7 +362,17 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ---- Enforce disabledTools (Sentinel oath), disabledAgents, and the Monarch summon cap ----
-  pi.on("tool_call", async (event) => {
+  pi.on("tool_call", async (event, ctx) => {
+    // Hunter Rank: a `git commit` lights a bonfire (counted on attempt).
+    if (event.toolName === "bash") {
+      const command = String((event.input as Record<string, unknown>)?.command ?? "");
+      if (/\bgit\s+commit\b/.test(command)) {
+        const stats = loadRankStats(ctx.cwd);
+        stats.bonfires += 1;
+        saveRankStats(ctx.cwd, stats);
+      }
+    }
+
     if (!active) return;
     const label = active.matched.map((m) => m.name).join("+") || "default";
 
@@ -420,76 +470,124 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => setOverride((args ?? "").trim(), ctx, "Equipped"),
   });
 
-  // ---- 🗡 /arise — Shadow Extraction: distill ONE battle-learned rule, approve, persist ----
+  // ---- 🗡 Shadow Extraction (/arise): distill ONE battle-learned rule, approve, persist ----
+  const DISTILL_PROMPT =
+    "Distill exactly ONE reusable engineering rule from the work in this session — a single imperative " +
+    "sentence of the kind that belongs in a profile's rules list. Output only that one sentence, nothing else.";
+
+  /** Append one rule to a profile in bundles.json, gated on a confirm dialog. Shared by the manual and auto-capture paths. */
+  const persistRule = async (
+    profileName: string,
+    ruleRaw: string,
+    ui: ExtensionContext["ui"],
+    cwd: string,
+    origin: string,
+  ): Promise<void> => {
+    const rule = ruleRaw.trim().replace(/^["']|["']$/g, "").trim();
+    if (!rule) {
+      ui.notify("No rule text to extract.", "error");
+      return;
+    }
+    const bundlesPath = resolveBundlesPath(cwd);
+    let parsed: Bundles;
+    try {
+      parsed = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+    } catch (err) {
+      ui.notify(`Cannot read ${bundlesPath}: ${(err as Error).message}`, "error");
+      return;
+    }
+    const profile = parsed.profiles?.find((p) => p.name === profileName);
+    if (!profile) {
+      ui.notify(`No profile named "${profileName}" in ${bundlesPath}. Known: ${(parsed.profiles ?? []).map((p) => p.name).join(", ") || "(none)"}`, "error");
+      return;
+    }
+    if ((profile.rules ?? []).includes(rule)) {
+      ui.notify(`That shadow is already bound to "${profileName}" — nothing to extract.`, "info");
+      return;
+    }
+    const approved = await ui.confirm(
+      `ARISE — extract into "${profileName}"?`,
+      `${origin}\n\nAppend this rule to ${profileName}.rules in ${bundlesPath}:\n\n"${rule}"`,
+    );
+    if (!approved) {
+      ui.notify("Shadow released — no change written.", "info");
+      return;
+    }
+    profile.rules = [...(profile.rules ?? []), rule];
+    try {
+      fs.writeFileSync(bundlesPath, JSON.stringify(parsed, null, 2) + "\n", "utf-8");
+    } catch (err) {
+      ui.notify(`Failed to write ${bundlesPath}: ${(err as Error).message}`, "error");
+      return;
+    }
+    ui.notify(`🗡 Shadow extracted — "${profileName}" now carries ${profile.rules.length} rules. It takes effect on the next gate of that class.`, "info");
+  };
+
   pi.registerCommand("arise", {
-    description: "Shadow Extraction: /arise (ask the model to distill one rule) | /arise <profile> <rule text> (persist it)",
+    description: "Shadow Extraction: /arise [profile] (model distills → auto-capture) | /arise <profile> <rule text> (persist directly)",
     handler: async (args, ctx) => {
       const trimmed = (args ?? "").trim();
-      if (!trimmed) {
-        pi.sendUserMessage(
-          "Distill exactly ONE reusable engineering rule from the work in this session — a single imperative sentence of the kind that belongs in a profile's rules list. Output only that one sentence, nothing else.",
-          { deliverAs: "followUp" },
-        );
-        ctx.ui.notify('🗡 ARISE — asking the current model to distill one shadow. Then persist it with: /arise <profile> <that rule>', "info");
-        return;
-      }
+      const knownProfiles = () => loadBundles(ctx.cwd, (m) => ctx.ui.notify(m, "warning")).profiles.map((p) => p.name);
       const sp = trimmed.search(/\s/);
+
+      // Form A: "/arise" or "/arise <profile>" — ask the model, then auto-capture its answer.
       if (sp < 0) {
-        ctx.ui.notify('Usage: /arise <profile> <rule text> — e.g. /arise implementation "Prefer the framework\'s native facility over a custom abstraction."', "error");
+        let target = trimmed || active?.matched[0]?.name || "";
+        if (!target) {
+          ctx.ui.notify(`Nothing classified yet — say which profile the shadow belongs to: /arise <profile>. Known: ${knownProfiles().join(", ")}`, "error");
+          return;
+        }
+        if (!knownProfiles().includes(target)) {
+          ctx.ui.notify(`No profile named "${target}". Known: ${knownProfiles().join(", ")}`, "error");
+          return;
+        }
+        awaitingShadow = { profile: target };
+        pi.sendUserMessage(DISTILL_PROMPT, { deliverAs: "followUp" });
+        ctx.ui.notify(`🗡 ARISE — the model will distill one shadow; I'll capture it into "${target}" for your approval. (Cancel: /arise clear)`, "info");
         return;
       }
+
+      // "/arise clear" — disarm a pending capture.
+      if (trimmed === "clear") {
+        awaitingShadow = null;
+        ctx.ui.notify("Shadow extraction disarmed.", "info");
+        return;
+      }
+
+      // Form B: "/arise <profile> <rule text>" — persist a rule you already have.
       const profileName = trimmed.slice(0, sp);
-      const rule = trimmed.slice(sp + 1).trim().replace(/^["']|["']$/g, "");
-      if (!rule) {
-        ctx.ui.notify("No rule text provided after the profile name.", "error");
-        return;
-      }
-      const bundlesPath = resolveBundlesPath(ctx.cwd);
-      let parsed: Bundles;
-      try {
-        parsed = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
-      } catch (err) {
-        ctx.ui.notify(`Cannot read ${bundlesPath}: ${(err as Error).message}`, "error");
-        return;
-      }
-      const profile = parsed.profiles?.find((p) => p.name === profileName);
-      if (!profile) {
-        ctx.ui.notify(`No profile named "${profileName}" in ${bundlesPath}. Known: ${(parsed.profiles ?? []).map((p) => p.name).join(", ") || "(none)"}`, "error");
-        return;
-      }
-      if ((profile.rules ?? []).includes(rule)) {
-        ctx.ui.notify(`That shadow is already bound to "${profileName}" — nothing to extract.`, "info");
-        return;
-      }
-      const approved = await ctx.ui.confirm(
-        `ARISE — extract into "${profileName}"?`,
-        `Append this rule to ${profileName}.rules in ${bundlesPath}:\n\n"${rule}"`,
-      );
-      if (!approved) {
-        ctx.ui.notify("Shadow released — no change written.", "info");
-        return;
-      }
-      profile.rules = [...(profile.rules ?? []), rule];
-      try {
-        fs.writeFileSync(bundlesPath, JSON.stringify(parsed, null, 2) + "\n", "utf-8");
-      } catch (err) {
-        ctx.ui.notify(`Failed to write ${bundlesPath}: ${(err as Error).message}`, "error");
-        return;
-      }
-      ctx.ui.notify(`🗡 Shadow extracted — "${profileName}" now carries ${profile.rules.length} rules. It takes effect on the next gate of that class.`, "info");
+      await persistRule(profileName, trimmed.slice(sp + 1), ctx.ui, ctx.cwd, "Extracted directly via /arise.");
     },
   });
 
-  // ---- 🏆 /rank — Hunter Rank card (in-session, flavor; resets when the session restarts) ----
+  // Auto-capture: when a shadow is armed, grab the model's next terminal text answer as the rule.
+  pi.on("message_end", async (event, ctx) => {
+    if (!awaitingShadow) return;
+    const msg = event.message as { role?: string; content?: { type: string; text?: string }[] } | undefined;
+    if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return;
+    // Wait for a terminal answer: skip turns that call tools (the distilled sentence comes as plain text).
+    if (msg.content.some((c) => c.type !== "text" && c.type !== "thinking")) return;
+    const text = msg.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join(" ").trim();
+    if (!text) return;
+    const target = awaitingShadow.profile;
+    awaitingShadow = null; // one-shot
+    // Take the first sentence/line so stray trailing prose can't ride along.
+    const rule = (text.split(/\n/)[0] ?? text).trim();
+    await persistRule(target, rule, ctx.ui, ctx.cwd, `Distilled by the model for "${target}".`);
+  });
+
+  // ---- 🏆 /rank — Hunter Rank card (persistent across sessions; stored next to bundles.json) ----
   pi.registerCommand("rank", {
-    description: "Show your Hunter Rank card for this session (gates cleared per class, bosses fought)",
+    description: "Show your Hunter Rank card (gates cleared per class, bosses fought, bonfires lit) — persists across sessions",
     handler: async (_args, ctx) => {
-      const gates = [...gatesCleared.entries()].sort((a, b) => b[1] - a[1]);
+      const stats = loadRankStats(ctx.cwd);
+      const gates = Object.entries(stats.gates).sort((a, b) => b[1] - a[1]);
       const total = gates.reduce((n, [, c]) => n + c, 0);
-      const rankName = total >= 20 ? "S" : total >= 10 ? "A" : total >= 5 ? "B" : total >= 2 ? "C" : total >= 1 ? "D" : "E";
+      const rankName = total >= 100 ? "S" : total >= 50 ? "A" : total >= 20 ? "B" : total >= 5 ? "C" : total >= 1 ? "D" : "E";
       const breakdown = gates.map(([name, c]) => `  ${name}: ${c}`).join("\n") || "  (no gates cleared yet)";
       ctx.ui.notify(
-        `🏆 Hunter Rank ${rankName} — ${total} gate${total === 1 ? "" : "s"} cleared, ${bossesFought} boss${bossesFought === 1 ? "" : "es"} fought` +
+        `🏆 Hunter Rank ${rankName} — ${total} gate${total === 1 ? "" : "s"} cleared, ` +
+          `${stats.bosses} boss${stats.bosses === 1 ? "" : "es"} fought, ${stats.bonfires} bonfire${stats.bonfires === 1 ? "" : "s"} lit` +
           (poisonedProviders.size ? `, ☠ poisoned (${[...poisonedProviders].join(", ")})` : "") +
           `\n${breakdown}`,
         "info",

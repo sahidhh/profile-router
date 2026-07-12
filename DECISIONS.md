@@ -253,17 +253,22 @@ surface were dropped rather than faked.
     autonomy, not reduced safety. A visible `⚔ Berserker: switching…` notice
     replaces the suppressed dialog so the switch is never fully silent.
 
-24. **`/arise` persists a user-approved rule; it does not auto-write model
-    output.** The verified `sendUserMessage(..., { deliverAs: "followUp" })`
-    lets `/arise` (no args) ask the current model to distill one rule, but an
-    extension command handler cannot synchronously read that future turn's
-    response. Rather than build a fragile multi-turn `message_end` scraper,
-    the persist step is an explicit second command — `/arise <profile>
-    <rule>` — gated on `ctx.ui.confirm`, deduped, one rule per extraction.
-    This honors the design's own "manual approval always" cap and keeps the
-    write path simple and auditable. Writes go to `resolveBundlesPath(cwd)`,
-    which mirrors `loadBundles`' read precedence (existing project file →
-    existing global file → project path).
+24. **`/arise` supports both one-shot auto-capture and direct persist; every
+    write is still user-approved.** `sendUserMessage(..., { deliverAs:
+    "followUp" })` asks the current model to distill one rule. A command
+    handler can't synchronously read that future turn, so capture is done
+    with a `message_end` listener armed by `/arise [profile]`: it grabs the
+    model's next *terminal* assistant message (skips tool-calling turns; takes
+    the first line so trailing prose can't ride along), then routes it through
+    the same `ctx.ui.confirm` + dedup persist path. It is one-shot (disarms on
+    capture; `/arise clear` cancels). `/arise <profile> <rule>` still persists
+    a rule you already have. The confirm gate is what makes auto-capture safe:
+    a mis-captured message is simply declined. This upgrades the earlier
+    two-step design (which was chosen only to avoid a "fragile multi-turn
+    scraper") now that the `message_end` shape is verified — the listener
+    reads `event.message.content` filtered to `type: "text"`
+    (`pi-ai/src/types.ts:598,723`). Writes go to `resolveBundlesPath(cwd)`,
+    mirroring `loadBundles`' read precedence.
 
 25. **Bleed and Elixir were NOT built.** Both need a read surface OMP does
     not expose to extensions (live token/context size for Bleed;
@@ -274,8 +279,32 @@ surface were dropped rather than faked.
     §8 and `API-FINDINGS.md` §(f). *Poison* (silent-fallback marker) covers
     the one degraded-state signal that IS observable (`credential_disabled`).
 
-26. **Hunter Rank (`/rank`) is in-session only, no persistence.** It tallies
-    gates-cleared-per-class and high/max-thinking "bosses" in memory and
-    resets on session restart. Persisting to a stats file would add a
-    write-side-effect and a schema to a router whose job is routing; the
-    flavor value doesn't justify that footprint. Kept deliberately tiny.
+26. **Hunter Rank (`/rank`) persists to `hunter-rank.json`.** (Revised from an
+    earlier in-session-only stance once cross-session persistence was
+    explicitly requested.) It accumulates gates-per-class, high/max-thinking
+    "bosses", and "bonfires" (git commits, detected from `BashToolInput.command
+    ~ /\bgit\s+commit\b/`, `bash.ts:156`) into a JSON file stored next to the
+    resolved `bundles.json` (`rankStatsPath` = `dirname(resolveBundlesPath)`),
+    so stats co-locate with config in project `.omp/` or global `~/.omp/`. All
+    reads/writes are best-effort in try/catch — **rank flavor must never break
+    a gate**, so any IO error is swallowed. Bonfires are counted on commit
+    *attempt* (`tool_call` fires before execution), and "deaths" from the
+    design are omitted (no clean failed-run signal exists). `hunter-rank.json`
+    is added to `.gitignore` since it's a generated per-install artifact.
+
+27. **Committed a guarded real-loader integration test
+    (`test/integration/real-loader.integration.ts`).** Phase 3's audit ran the
+    deep-loader smoke test manually and declined to commit it, fearing brittle
+    internal-path imports. Two things changed that calculus: (a) the package's
+    own `exports` map officially exposes `./extensibility/extensions/*` and
+    `./utils/*` as subpath entry points (not truly private), and (b) the test
+    is guarded — it `SKIP`s (exit 0) if the internals can't be imported or the
+    real `ConcreteExtensionAPI` can't be constructed in the host environment,
+    so it strengthens verification where it can and never becomes a CI
+    failure where it can't. It runs under `bun` (`npm run test:integration`),
+    kept out of the Node `npm test` path, and loads the extension through the
+    real `loadExtensionFromFactory` to prove `pi.on`/`registerCommand`/
+    `sendUserMessage` bind against the genuine API — a class of confidence the
+    hand-rolled fake `pi` in the Node suite can't provide. The live agent loop
+    (provider calls) remains out of reach without credentials and stays a
+    documented manual check.
