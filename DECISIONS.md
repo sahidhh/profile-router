@@ -199,3 +199,69 @@ here. Ordered roughly by the phase in which it arose.
     manual test a human runs by hand is guaranteed consistent with what CI
     already verified — no drift between "what we tested" and "what we tell
     the user to try."
+
+---
+
+## Phase 5 — cheap-tier diversification + LSP/AST exploration standard
+
+19. **Cheap-tier profiles routed off Anthropic** per the maintainer's
+    request ("token efficient profiles don't just use claude variants").
+    `lookup` → `google/gemini-2.5-flash-lite`, `hotfix` →
+    `deepseek/deepseek-v4-flash`. Both strings verified to exist in the
+    installed `@oh-my-pi/pi-catalog` `models.json` (v16.4.1) under a
+    first-party provider **and** as raw OpenRouter ids, so they resolve
+    through either credential path (`matchModel` tries exact
+    `provider/id` first, then exact raw-id — `config/model-resolver.ts`).
+    Judgment tiers (Sonnet/Opus) deliberately left on Anthropic — the
+    request scoped diversification to "simple tasks". Alternates the
+    maintainer named (MiniMax M3, IBM Granite micro, Qwen instruct,
+    Trinity preview) are catalog-verified and documented as drop-ins in
+    `MANUAL.md` §2 rather than shipped as defaults, since which one is
+    best depends on which provider the installing user has credentials
+    for; an unresolvable choice degrades to a one-time warning by design.
+
+20. **"thy3 preview" interpreted as Arcee's Trinity large preview**
+    (`arcee-ai/trinity-large-preview`) — the only preview-suffixed
+    cheap-model family in the catalog whose name plausibly abbreviates to
+    "thy/trinity"; no catalog entry matches "thy" literally. Recorded as
+    an interpretation, not a fact; trivially swappable in the manual's
+    table if a different model was meant.
+
+21. **LSP/AST-first exploration standardized across all code-exploring
+    profiles.** OMP ships built-in `lsp` and `ast_grep` tools (names
+    verified in `src/tools/builtin-names.ts`); both were added to the
+    `tools` list of every profile that explores code, and the shared
+    search-first rule was rewritten to name them explicitly ("lsp for
+    symbols/definitions/references, ast_grep for code patterns, before
+    falling back to plain grep or bulk reads"). Rationale: structural
+    search returns precise spans instead of whole files, which is what
+    makes a micro/instruct-class model viable for `lookup` — it
+    summarises located spans rather than reasoning over bulk context.
+    `ast_edit` was deliberately **not** added anywhere: no profile's
+    rules motivate structural rewriting, and hotfix's minimal toolset
+    (`read`/`edit`/`bash`) is a deliberate ceremony floor left untouched.
+
+22. **`lookup` extended with summarisation vocabulary**
+    (`summarize`/`summarise`/`summary`/`overview`/`walkthrough`) instead
+    of adding an 8th "summarise" profile — summarisation is the same
+    "retrieval, not judgment" workload `lookup` already models, and the
+    4–7 profile cap (constraint from the original mission) would be
+    exceeded by a new profile. Collision-checked against every other
+    profile's keywords and the reachability prompt fixture; a dedicated
+    reachability test for the new vocabulary was added.
+
+23. **Model fallback chains + OpenRouter-first routing on every tier
+    except `premium`** (follow-up to #19, requested by the maintainer:
+    "cheaper models via openrouter … keep current as fallback").
+    `Profile.model` widened to `string | string[]`; the extension walks
+    the winning profile's chain in order and uses the first spec
+    `ctx.models.resolve()` can match, warning (once) only when the whole
+    chain is dead. Shipped chains: architecture/review →
+    `openrouter/deepseek/deepseek-v4-pro`, implementation/investigation/
+    default → `openrouter/minimax/minimax-m3`, hotfix →
+    `openrouter/deepseek/deepseek-v4-flash`, lookup →
+    `openrouter/google/gemini-2.5-flash-lite`, each with the previous
+    model as fallback. `premium` deliberately keeps Opus with no cheap
+    primary: it fires on schema/secrets/migrations/destructive-git,
+    where a wrong answer costs more than any token budget — flagged in
+    `MANUAL.md` as a one-line change for operators who disagree.
