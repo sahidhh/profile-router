@@ -107,3 +107,5 @@ See `MANUAL.md` §1 for install paths (project: `.omp/extensions/` +
 npm install        # dev deps only (typescript + the OMP package for types)
 npm run check      # strict typecheck + full test suite
 ```
+
+The `@oh-my-pi/pi-coding-agent` version is pinned deliberately (exact version, not a range) due to upstream release cadence; bumping it is a manual, deliberate action. After bumping, re-run `npm run check` to confirm nothing broke.

@@ -21,7 +21,7 @@
   },
   "homepage": "https://github.com/sahidhh/profile-router#readme",
   "devDependencies": {
-    "@oh-my-pi/pi-coding-agent": "^16.4.1",
+    "@oh-my-pi/pi-coding-agent": "16.4.1",
     "@types/node": "^26.1.1",
     "typescript": "^7.0.2"
   }
