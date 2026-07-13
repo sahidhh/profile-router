@@ -583,6 +583,83 @@ describe("F2 regression: stale /profile override never mislabels an auto-classif
   });
 });
 
+describe("config-change notice", () => {
+  test("first load is silent", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })] });
+      const { handlers, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw here", systemPrompt: [] }, ctx);
+
+      assert.equal(
+        notifications.filter((n) => n.msg.includes("bundles.json changed")).length,
+        0,
+        "first load should not emit a change notice",
+      );
+    });
+  });
+
+  test("changed content notifies once with 12-hex hash", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })] });
+      const { handlers, notifications, ctx } = await installExtension(dir);
+
+      // First load (silent)
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw first", systemPrompt: [] }, ctx);
+      assert.equal(
+        notifications.filter((n) => n.msg.includes("bundles.json changed")).length,
+        0,
+        "first load should be silent",
+      );
+
+      // Rewrite with different content
+      writeBundles(dir, { profiles: [profile({ name: "beta", keywords: ["beta-kw"] })] });
+
+      // Second load with changed content
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "beta-kw second", systemPrompt: [] }, ctx);
+
+      const changeNotice = notifications.find((n) => n.msg.includes("bundles.json changed"));
+      assert.ok(changeNotice, "should emit a change notice");
+      assert.equal(changeNotice!.level, "info", "change notice should be at info level");
+      assert.ok(
+        /bundles\.json changed \([0-9a-f]{12}\) — applied/.test(changeNotice!.msg),
+        `message should match pattern, got: ${changeNotice!.msg}`,
+      );
+    });
+  });
+
+  test("unchanged content is silent on reload", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })] });
+      const { handlers, notifications, ctx } = await installExtension(dir);
+
+      // First load (silent)
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw first", systemPrompt: [] }, ctx);
+
+      // Change and reload to set lastConfigHash
+      writeBundles(dir, { profiles: [profile({ name: "beta", keywords: ["beta-kw"] })] });
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "beta-kw second", systemPrompt: [] }, ctx);
+      assert.ok(
+        notifications.some((n) => n.msg.includes("bundles.json changed")),
+        "second load should notify change",
+      );
+
+      // Third load without changing the file
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "beta-kw third", systemPrompt: [] }, ctx);
+      assert.equal(
+        notifications.filter((n) => n.msg.includes("bundles.json changed")).length,
+        0,
+        "unchanged content should not emit a notice on reload",
+      );
+    });
+  });
+});
+
 describe("F3 regression: unresolvable model warns exactly once per session", () => {
   test("notifies naming the profile and bad model string, then degrades silently on repeat", async () => {
     await withTempProjectDir(async (dir) => {

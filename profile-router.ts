@@ -19,6 +19,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import * as crypto from "node:crypto";
 
 // ---------- Types (mirror bundles.json schema) ----------
 
@@ -76,6 +77,25 @@ export function loadBundles(cwd: string, notify?: (msg: string) => void): Bundle
     }
   }
   return { profiles: [] };
+}
+
+/**
+ * Compute a short content hash (sha256, first 12 hex chars) of the first-existing
+ * bundles.json candidate without re-implementing config loading.
+ * Returns null if no file is found or if a read error occurs.
+ */
+function configContentHash(cwd: string): string | null {
+  const candidates = [path.join(cwd, ".omp", "bundles.json"), path.join(os.homedir(), ".omp", "bundles.json")];
+  for (const p of candidates) {
+    if (!fs.existsSync(p)) continue;
+    try {
+      const raw = fs.readFileSync(p, "utf-8");
+      return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 12);
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 // ---------- Classification (keyword scoring, word-boundary matching) ----------
@@ -241,6 +261,7 @@ export default function (pi: ExtensionAPI) {
   let manualPinsSet = 0;
   let modelSwitchesAccepted = 0;
   let modelSwitchesDeclined = 0;
+  let lastConfigHash: string | null = null;       // content hash from the most recent bundles.json load this session
 
   const debugLog = (msg: string, context?: Record<string, unknown>) => {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
@@ -250,6 +271,14 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
     lastPrompt = event.prompt;
+
+    const currentHash = configContentHash(ctx.cwd);
+    if (currentHash !== null) {
+      if (lastConfigHash !== null && currentHash !== lastConfigHash) {
+        ctx.ui.notify(`bundles.json changed (${currentHash}) — applied`, "info");
+      }
+      lastConfigHash = currentHash;
+    }
 
     let matches = classify(event.prompt, bundles);
     let overrideApplied = false;

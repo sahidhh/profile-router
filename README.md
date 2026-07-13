@@ -91,7 +91,10 @@ context.
 - **Edit `bundles.json`, not the extension.** JSON is the only authoring path
   — there is no add/edit command, by design (it's git-diffable and testable).
   It's re-read from disk on every prompt — changes apply on the next prompt, no
-  restart. Run `/profile validate` (or `npm test`) after editing to catch
+  restart. After the first prompt in a session, if the extension detects that
+  `bundles.json` content has changed, it notifies once with the new content hash
+  (a short 12-hex fingerprint), so you can see when config edits take effect.
+  Run `/profile validate` (or `npm test`) after editing to catch
   mistakes. Add an optional `description` to each profile for a friendly
   `/profile list`.
 - **Run `npm test` after editing profiles.** The reachability suite fails

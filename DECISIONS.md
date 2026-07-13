@@ -497,3 +497,30 @@ here. Ordered roughly by the phase in which it arose.
     `before_agent_start` stays silent when nothing matched and no rules are declared,
     because it's a per-turn background event; the asymmetry (explicit request →
     message, background event → silence) is conservative and expected.
+
+---
+
+## Phase 15 — Q5 config-change notice
+
+38. **Config-change detection via content hash, scoped to `before_agent_start` only.**
+    The extension now notifies once per session when `bundles.json` content changes
+    between prompts (first load is always silent). Implementation: a small
+    `configContentHash()` helper duplicates `loadBundles()`'s candidate-path logic
+    and returns a short sha256 hash (first 12 hex chars, human-scannable) of the
+    first-existing file's raw bytes, or null if missing/unreadable. Session state
+    tracks the last hash in `lastConfigHash`; on each `before_agent_start` call, if
+    the current hash differs from the last non-null hash, exactly one `info` notification
+    fires with format `bundles.json changed (<12-hex>) — applied`. The notification
+    is scoped to `before_agent_start` only (read-only inspection subcommands like
+    `/profile list`/`/profile validate`/`/profile explain` do not trigger it), because
+    only `before_agent_start` represents the config actually being *applied* to a turn.
+    Why not modify `loadBundles` itself: returing a hash from `loadBundles` would
+    couple notification logic to config loading, and exportable return-type changes
+    violate the "do not change `loadBundles`'s exported signature or behavior"
+    constraint — a separate helper keeps the concerns orthogonal. Why
+    sha256-first-12-hex: full hashes are unreadable; 12 hex chars (48 bits) are
+    collision-unlikely for session-local identity and remain human-scannable in
+    notifications; longer truncations add no value for a per-session notice.
+    Malformed/missing config leaves `lastConfigHash` untouched (only updates on
+    successful hash reads), so a transient read glitch never erases session-level
+    hash memory.

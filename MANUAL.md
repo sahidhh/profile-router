@@ -176,7 +176,14 @@ context.
 On **every** prompt submission (`before_agent_start`):
 
 1. `bundles.json` is read fresh from disk (project path checked first, then
-   global) — edits take effect on the next prompt, no restart needed.
+   global) — edits take effect on the next prompt, no restart needed. After the
+   first prompt in a session, if the file's raw content changes (detected via a
+   sha256 content hash), the extension notifies once with the notification message
+   format `bundles.json changed (<12-hex-hash>) — applied` at `info` level — this
+   tells you when your edits take effect. If the file is missing or unreadable, no
+   notification fires (the notification only fires on detected *changes*, not on
+   transient read errors; any prior hash state is preserved until a successful
+   read occurs).
 2. The prompt text is lowercased and matched against every profile's
    `keywords` with word-boundary regexes (`\bkeyword\b`), so `"fix"` won't
    match inside `"prefix"`. Each hit is worth 1 point per matched keyword.
