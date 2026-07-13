@@ -233,6 +233,7 @@ export function validateBundles(bundles: Bundles): string[] {
 export default function (pi: ExtensionAPI) {
   let active: MergedConfig | null = null;
   let manualOverride: string | null = null;        // set via /profile <name>
+  let lastPrompt: string | null = null;             // tracks last classified prompt for /profile misroute
   let debugTrace = false;                          // toggled via /profile debug on|off
   const modelDecisions = new Map<string, boolean>(); // "from→to" -> user's answer, for this session
   const unresolvedModelWarned = new Set<string>();   // model strings already warned about this session
@@ -244,6 +245,7 @@ export default function (pi: ExtensionAPI) {
   // ---- Every prompt: classify, merge, inject ----
   pi.on("before_agent_start", async (event, ctx) => {
     const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+    lastPrompt = event.prompt;
 
     let matches = classify(event.prompt, bundles);
     let overrideApplied = false;
@@ -481,6 +483,41 @@ export default function (pi: ExtensionAPI) {
         const headerText = `🔎 Profile routing for "${text.slice(0, 60)}${text.length > 60 ? "…" : ""}"`;
         const lines = [headerText, ...formatTraceLines(rows)];
         ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+
+      // ---- /profile misroute [expected-profile] : log misclassifications to .omp/misroutes.jsonl ----
+      if (sub === "misroute") {
+        if (!lastPrompt) {
+          ctx.ui.notify("nothing to log", "warning");
+          return;
+        }
+        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+        const expectedArg = rest.join(" ").trim() || null;
+
+        // Validate expected-profile argument if provided
+        if (expectedArg && !bundles.profiles.some((p) => p.name === expectedArg)) {
+          ctx.ui.notify(
+            `No profile named "${expectedArg}" in bundles.json. Known: ${bundles.profiles.map((p) => p.name).join(", ") || "(none loaded)"}`,
+            "error",
+          );
+          return;
+        }
+
+        // Create .omp directory if needed and append the JSON line
+        const ompDir = path.join(ctx.cwd, ".omp");
+        fs.mkdirSync(ompDir, { recursive: true });
+        const logPath = path.join(ompDir, "misroutes.jsonl");
+
+        const entry = {
+          ts: new Date().toISOString(),
+          prompt: lastPrompt.slice(0, 500),
+          matched: active?.matched.map((m) => m.name) ?? [],
+          expected: expectedArg,
+        };
+
+        fs.appendFileSync(logPath, JSON.stringify(entry) + "\n");
+        ctx.ui.notify(`Logged misroute to ${logPath}`, "info");
         return;
       }
 

@@ -441,3 +441,25 @@ here. Ordered roughly by the phase in which it arose.
     empty (matched profile declares no rules, or default profile with no
     rules), and otherwise returns the identical rules-block formatting
     string already used for `systemPrompt` injection, for consistency.
+
+---
+
+## Phase 11 — Q1 /profile misroute
+
+34. **JSONL append format for misroute logging.** `/profile misroute
+    [expected-profile]` logs classification misses as one JSON object per
+    line to `.omp/misroutes.jsonl`, appending if the file exists (no
+    destructive rewrites). JSONL is streaming-friendly and pairs well with
+    line-by-line analysis scripts. Prompt text is truncated to 500 chars to
+    avoid unbounded file growth on very long prompts. `matched` is derived
+    from the session-scoped `active` state (populated by `before_agent_start`),
+    so stale classification is impossible — misroutes log exactly what the
+    last real prompt matched. The `expected` field is the optional
+    `[expected-profile]` argument (a profile name, or null if omitted) — not
+    the profile that *should have* matched (unknowable without human
+    judgment), but what the user believes the correct routing was. Validation
+    reuses the existing error UX from plain `/profile <name>` pin-rejection
+    (unknown profile names are rejected with the same message listing known
+    profiles). No write occurs if no prompt has been classified (`lastPrompt`
+    is still null) or if validation fails, avoiding noise when the feature
+    is experimented with on fresh sessions or against malformed bundles.

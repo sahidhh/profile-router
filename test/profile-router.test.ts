@@ -852,6 +852,98 @@ describe("/profile explain", () => {
   });
 });
 
+describe("/profile misroute", () => {
+  test("after a prompt is classified, /profile misroute writes correct JSON shape to .omp/misroutes.jsonl", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["alpha-kw"] }),
+          profile({ name: "beta", keywords: ["beta-kw"] }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      // Classify a prompt first
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw test prompt", systemPrompt: [] }, ctx);
+
+      // Now log a misroute
+      notifications.length = 0;
+      await commands["profile"]!.handler("misroute beta", ctx);
+
+      // Verify file was created and contains the correct JSON
+      const logPath = path.join(dir, ".omp", "misroutes.jsonl");
+      assert.ok(fs.existsSync(logPath), "misroutes.jsonl should exist");
+
+      const content = fs.readFileSync(logPath, "utf-8");
+      const lines = content.trim().split("\n");
+      assert.equal(lines.length, 1, "should have exactly one line");
+
+      const entry = JSON.parse(lines[0]!);
+      assert.ok(entry.ts, "ts field should be present");
+      assert.ok(new Date(entry.ts).getTime(), "ts should be a valid ISO8601 date");
+      assert.equal(entry.prompt, "alpha-kw test prompt", "prompt should match");
+      assert.deepEqual(entry.matched, ["alpha"], "matched should contain matched profile names");
+      assert.equal(entry.expected, "beta", "expected should be the provided profile name");
+
+      // Verify success notification
+      assert.ok(
+        notifications.some((n) => n.level === "info" && n.msg.includes("misroutes.jsonl")),
+        "should emit info notification with path",
+      );
+    });
+  });
+
+  test("/profile misroute with unknown expected-profile emits error notification and does not write file", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "known-profile", keywords: ["kw"] })],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      // Classify first
+      await handlers["before_agent_start"]!({ prompt: "kw here", systemPrompt: [] }, ctx);
+
+      // Try to misroute with unknown profile
+      notifications.length = 0;
+      await commands["profile"]!.handler("misroute unknown-profile", ctx);
+
+      // Should emit error
+      assert.ok(
+        notifications.some((n) => n.level === "error" && n.msg.includes("unknown-profile")),
+        "should emit error for unknown profile",
+      );
+
+      // File should NOT be created
+      const logPath = path.join(dir, ".omp", "misroutes.jsonl");
+      assert.equal(fs.existsSync(logPath), false, "misroutes.jsonl should not be created on error");
+    });
+  });
+
+  test("/profile misroute with no prior classification emits warning and does not write file", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "test", keywords: ["kw"] })],
+      });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      // Call misroute without any prior classification
+      notifications.length = 0;
+      await commands["profile"]!.handler("misroute", ctx);
+
+      // Should emit warning
+      assert.ok(
+        notifications.some((n) => n.level === "warning" && n.msg === "nothing to log"),
+        "should emit warning when no prompt classified",
+      );
+
+      // File should NOT be created
+      const logPath = path.join(dir, ".omp", "misroutes.jsonl");
+      assert.equal(fs.existsSync(logPath), false, "misroutes.jsonl should not be created when no prompt");
+    });
+  });
+});
+
 // ---------- T5: larger, realistic regression fixture (paraphrases, near-misses, multi-match) ----------
 
 describe("routing-expectations fixture: semantic-overlap regression", () => {

@@ -250,6 +250,14 @@ On **every** prompt submission (`before_agent_start`):
   duplicate profile names, missing/empty `keywords`, unknown `thinkingLevel`,
   and malformed `model`. Reports `✓ valid` or an itemized list of problems —
   no prompt needed.
+- `/profile misroute [expected-profile]` — logs the last classified prompt
+  (truncated to 500 chars), the profiles it matched, and (optionally) the
+  profile you expected it to match, as a single JSON line appended to
+  `.omp/misroutes.jsonl` (created if not present). Requires at least one
+  prompt to have been classified in this session. If `[expected-profile]` is
+  provided, it must be a known profile name; unknown names are rejected with
+  the same error message as `/profile <unknown-name>`. Useful for collecting
+  misclassification examples to analyze and fix keyword collisions.
 
 ---
 
