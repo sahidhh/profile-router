@@ -1,7 +1,7 @@
 {
   "default": {
     "model": [
-      "openrouter/minimax/minimax-m3",
+      "minimax/minimax-m3",
       "anthropic/claude-sonnet-5"
     ],
     "thinkingLevel": "medium",
@@ -44,7 +44,7 @@
       ],
       "disabledAgents": [],
       "model": [
-        "openrouter/deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-pro",
         "anthropic/claude-sonnet-5"
       ],
       "thinkingLevel": "high"
@@ -82,7 +82,7 @@
       ],
       "disabledAgents": [],
       "model": [
-        "openrouter/minimax/minimax-m3",
+        "minimax/minimax-m3",
         "anthropic/claude-sonnet-5"
       ],
       "thinkingLevel": "medium"
@@ -122,7 +122,7 @@
       ],
       "disabledAgents": [],
       "model": [
-        "openrouter/deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-pro",
         "anthropic/claude-sonnet-5"
       ],
       "thinkingLevel": "high"
@@ -160,7 +160,7 @@
       ],
       "disabledAgents": [],
       "model": [
-        "openrouter/minimax/minimax-m3",
+        "minimax/minimax-m3",
         "anthropic/claude-sonnet-5"
       ],
       "thinkingLevel": "medium"
@@ -241,7 +241,6 @@
         "task"
       ],
       "model": [
-        "openrouter/deepseek/deepseek-v4-flash",
         "deepseek/deepseek-v4-flash"
       ],
       "thinkingLevel": "low"
@@ -287,7 +286,6 @@
         "task"
       ],
       "model": [
-        "openrouter/google/gemini-2.5-flash-lite",
         "google/gemini-2.5-flash-lite"
       ],
       "thinkingLevel": "low"

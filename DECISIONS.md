@@ -312,5 +312,32 @@ here. Ordered roughly by the phase in which it arose.
     `/profile validate` (backed by the pure, unit-tested `validateBundles()`)
     closes the ergonomics gap — structural checks (duplicate names, empty
     keywords, bad `thinkingLevel`/`model`) without having to send a prompt.
+
+---
+
+## Phase 7 — T1 provider/model verification
+
+29. **Catalog-resolution fix for openrouter/* model strings.** Automated catalog
+    verification revealed that `openrouter/minimax/minimax-m3`,
+    `openrouter/deepseek/deepseek-v4-pro`, `openrouter/deepseek/deepseek-v4-flash`,
+    and `openrouter/google/gemini-2.5-flash-lite` do not exist as entries in the
+    installed pi-catalog `models.json` (v16.4.1). These strings fail
+    `ctx.models.resolve()` and would break the fallback chain at runtime; users
+    would see "model not resolvable" warnings even though OpenRouter can proxy these
+    models (verified by live API test). **Replaced with native provider equivalents:**
+    `minimax/minimax-m3`, `deepseek/deepseek-v4-pro`, `deepseek/deepseek-v4-flash`,
+    `google/gemini-2.5-flash-lite` — all catalog-verified under their first-party
+    providers per pi-catalog `models.json`. Trade-off: these models now require
+    their native provider credentials (MINIMAX_API_KEY, DEEPSEEK_API_KEY,
+    GOOGLE_API_KEY) to call directly, but OpenRouter users with OPENROUTER_API_KEY
+    can still access them via OpenRouter's proxy (at runtime, not through this
+    extension's routing — model resolution uses native provider). Documented as
+    OpenRouter proxy-access is outside the catalog's scope; model resolution is
+    credential-aware and falls back gracefully per design (see
+    `config/model-resolver.ts` `resolveModelOverrideWithAuthFallback`). All native
+    provider model IDs are now live-verified to work when credentials are present.
+    Anthropic models (claude-sonnet-5, claude-opus-4-8) remain unchanged as they
+    are direct native entries in the catalog and do not require the openrouter/*
+    prefix.
     Documented as the answer to "is JSON the only way to edit profiles?" in
     both `README.md` and `MANUAL.md`.

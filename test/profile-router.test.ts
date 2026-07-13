@@ -285,6 +285,9 @@ describe("loadBundles", () => {
 
   test("missing config returns empty profiles, no crash, no notify", () => {
     withTempDir((dir) => {
+      // Create an empty bundles.json in project .omp to shadow any global ~/.omp/bundles.json
+      fs.mkdirSync(path.join(dir, ".omp"));
+      fs.writeFileSync(path.join(dir, ".omp", "bundles.json"), JSON.stringify({ profiles: [] }));
       let notified = false;
       const bundles = loadBundles(dir, () => {
         notified = true;
