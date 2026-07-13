@@ -851,3 +851,40 @@ describe("/profile explain", () => {
     });
   });
 });
+
+// ---------- T5: larger, realistic regression fixture (paraphrases, near-misses, multi-match) ----------
+
+describe("routing-expectations fixture: semantic-overlap regression", () => {
+  const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+  const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+
+  const fixturePath = path.join(import.meta.dirname, "fixtures", "routing-expectations.json");
+  const fixture = JSON.parse(fs.readFileSync(fixturePath, "utf-8")) as {
+    prompt: string;
+    expected: string;
+    note?: string;
+  }[];
+
+  /** Formats every profile's score + matched keywords (not just the winner) for a debuggable failure message. */
+  function formatFullTrace(prompt: string): string {
+    const rows = explain(prompt, realBundles);
+    const header = `explain("${prompt}"):`;
+    const body = rows
+      .map((r) => `  ${r.name} (order ${r.order}): score=${r.score} matched=[${r.matched.join(", ")}]`)
+      .join("\n");
+    return `${header}\n${body}`;
+  }
+
+  fixture.forEach((entry, i) => {
+    test(`[${i}] "${entry.prompt}" -> expected "${entry.expected}"${entry.note ? ` (${entry.note})` : ""}`, () => {
+      const hits = classify(entry.prompt, realBundles);
+      const trace = formatFullTrace(entry.prompt);
+
+      if (entry.expected === "default") {
+        assert.equal(hits.length, 0, trace);
+      } else {
+        assert.equal(hits[0]?.profile.name, entry.expected, trace);
+      }
+    });
+  });
+});

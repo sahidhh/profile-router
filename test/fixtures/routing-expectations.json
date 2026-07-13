@@ -1,0 +1,102 @@
+[
+  {
+    "prompt": "We need to design a new module for handling webhooks, and it cuts across several existing services.",
+    "expected": "architecture",
+    "note": "paraphrase — matches 'design' + 'new module'"
+  },
+  {
+    "prompt": "The team wants to build feature flags support; can you write code for the new endpoint?",
+    "expected": "implementation",
+    "note": "paraphrase — matches 'build feature' + 'write code'"
+  },
+  {
+    "prompt": "Can someone do a review of this PR before we merge it?",
+    "expected": "review",
+    "note": "paraphrase — matches bare 'review'; 'before we merge' deliberately avoids 'pre-merge'"
+  },
+  {
+    "prompt": "Why is this test flaky? I need to trace through the logs and get to the root cause.",
+    "expected": "investigation",
+    "note": "paraphrase — matches 'why is' + 'trace' + 'root cause'"
+  },
+  {
+    "prompt": "This change touches the schema and rotates a secret token, so treat it carefully.",
+    "expected": "premium",
+    "note": "paraphrase — matches 'schema' + 'secret' + 'token'"
+  },
+  {
+    "prompt": "We're under time pressure and need a quick fix that's easily reversible if it goes wrong.",
+    "expected": "hotfix",
+    "note": "paraphrase — matches 'time pressure' + 'quick fix'"
+  },
+  {
+    "prompt": "Can you show me where the auth config lives and give a quick summary of it?",
+    "expected": "lookup",
+    "note": "paraphrase — matches 'show me' + 'summary'"
+  },
+  {
+    "prompt": "I'm curious about how our team usually structures commit messages before a release.",
+    "expected": "default",
+    "note": "near-miss — no literal keyword from any profile"
+  },
+  {
+    "prompt": "What's the best way to onboard a new hire onto our codebase over their first week?",
+    "expected": "default",
+    "note": "near-miss — 'new hire' is not 'new module'; \"what's\" is not \"what is\""
+  },
+  {
+    "prompt": "Our deployment pipeline runs nightly and emails the team a status digest each morning.",
+    "expected": "default",
+    "note": "near-miss — everyday dev vocabulary, no keyword overlap"
+  },
+  {
+    "prompt": "Let's grab coffee and chat about how the team feels about the new sprint schedule.",
+    "expected": "default",
+    "note": "near-miss — 'new sprint schedule' is not 'new module'"
+  },
+  {
+    "prompt": "Our marketing team wants updated screenshots for the app store listing.",
+    "expected": "default",
+    "note": "near-miss — unrelated to any profile vocabulary"
+  },
+  {
+    "prompt": "We are finding it hard to keep the demo data consistent across environments.",
+    "expected": "default",
+    "note": "near-miss — 'finding' fails the word-boundary check for keyword 'find' (\\bfind\\b requires a non-word char after 'd')"
+  },
+  {
+    "prompt": "The system is reviewing incoming webhook payloads automatically every night.",
+    "expected": "default",
+    "note": "near-miss — 'reviewing' fails the word-boundary check for keyword 'review'"
+  },
+  {
+    "prompt": "Can you implement the caching layer and then explain how it works?",
+    "expected": "implementation",
+    "note": "multi-match tie — 'implement' (implementation) and 'explain' (lookup) both score 1; declaration order (implementation before lookup) breaks the tie"
+  },
+  {
+    "prompt": "Let's review this PR and also debug why the CI is failing.",
+    "expected": "review",
+    "note": "multi-match tie — 'review' (review) and 'debug' (investigation) both score 1; declaration order (review before investigation) breaks the tie"
+  },
+  {
+    "prompt": "This urgent fix touches a database migration, so let's be careful.",
+    "expected": "premium",
+    "note": "multi-match tie — 'urgent fix' (hotfix) and 'migration' (premium) both score 1; declaration order (premium before hotfix) breaks the tie"
+  },
+  {
+    "prompt": "Please audit the code and also search the repo for similar bugs; a full code review is needed too.",
+    "expected": "review",
+    "note": "multi-match, non-tied — review scores 2 ('audit' + 'code review', with 'review' inside 'code review' claimed and not double-counted) beating lookup's 1 ('search')"
+  },
+  {
+    "prompt": "Please don't force-push to main or run reset --hard, that could break shared history.",
+    "expected": "premium",
+    "note": "second premium paraphrase — matches 'force-push' + 'reset --hard'"
+  },
+  {
+    "prompt": "We should redesign this subsystem since it doesn't reflect the current system shape anymore.",
+    "expected": "architecture",
+    "note": "second architecture paraphrase — matches 'redesign' + 'system shape'"
+  }
+]
