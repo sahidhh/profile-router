@@ -240,8 +240,17 @@ On **every** prompt submission (`before_agent_start`):
 - `/profile <name>` — pin classification to a single named profile until
   cleared. Rejects unknown names with the list of profiles actually loaded
   from `bundles.json` (helps catch typos immediately, never silently no-ops).
-- `/profile clear` — remove the pin and resume automatic keyword
-  classification on the next prompt.
+- `/profile <name> --once` — pin classification to a single named profile for
+  exactly the next classified prompt, then auto-clear immediately — no need
+  to remember `/profile clear` afterward. Same unknown-name validation as the
+  plain pin. Setting a `--once` pin overwrites any existing pin outright
+  (plain or once) — there is no stack of pins to revert to; after the pin is
+  consumed, the session returns to full auto-classification. `/profile clear`
+  also removes an armed-but-unused `--once` pin. While a `--once` pin is
+  applied, the status line shows `(manual, once)` for that one turn only; the
+  following prompt is classified normally with no manual suffix.
+- `/profile clear` — remove the pin (plain or `--once`) and resume automatic
+  keyword classification on the next prompt.
 - `/profile list` — list every profile loaded from `bundles.json` with its
   `description` (or, if none, its keywords), model, and thinking level. The
   quickest way to see what's available.

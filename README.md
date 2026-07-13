@@ -68,7 +68,9 @@ context.
 - **Let keywords do the routing; pin only for exceptions.** `/profile <name>`
   pins, `/profile clear` unpins, `/profile` shows scores. The status line
   (`⚙ lookup`) always shows what matched — glance at it before the model
-  starts spending tokens.
+  starts spending tokens. Add `--once` (`/profile <name> --once`) to pin for
+  just the next prompt — it auto-clears immediately after that one prompt is
+  classified, so you don't have to remember to `/profile clear` afterward.
 - **Discover and debug with the `/profile` subcommands:**
   - `/profile list` — every profile with its one-line description, model, and
     thinking level.

@@ -583,6 +583,133 @@ describe("F2 regression: stale /profile override never mislabels an auto-classif
   });
 });
 
+describe("turn-scoped --once pin", () => {
+  test("once-pin routes exactly one prompt then auto-clears", async () => {
+    await withTempProjectDir(async (dir) => {
+      const bundles: Bundles = {
+        profiles: [
+          profile({ name: "once-target", keywords: ["once-kw"] }),
+          profile({ name: "other-profile", keywords: ["other-kw"] }),
+        ],
+      };
+      writeBundles(dir, bundles);
+
+      const { handlers, commands, statuses, ctx } = await installExtension(dir);
+
+      await commands["profile"]!.handler("once-target --once", ctx);
+
+      // Prompt would normally match other-profile, but the once-pin must win.
+      await handlers["before_agent_start"]!({ prompt: "other-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ once-target (manual, once)");
+    });
+  });
+
+  test("following prompt after a consumed once-pin is auto-classified and NOT labeled manual", async () => {
+    await withTempProjectDir(async (dir) => {
+      const bundles: Bundles = {
+        profiles: [
+          profile({ name: "once-target", keywords: ["once-kw"] }),
+          profile({ name: "other-profile", keywords: ["other-kw"] }),
+        ],
+      };
+      writeBundles(dir, bundles);
+
+      const { handlers, commands, statuses, ctx } = await installExtension(dir);
+
+      await commands["profile"]!.handler("once-target --once", ctx);
+
+      // First prompt consumes the once-pin.
+      await handlers["before_agent_start"]!({ prompt: "other-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ once-target (manual, once)");
+
+      // Second prompt must be auto-classified and NOT labeled manual.
+      await handlers["before_agent_start"]!({ prompt: "other-kw again", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ other-profile");
+    });
+  });
+
+  test("/profile clear removes an armed-but-unused once-pin", async () => {
+    await withTempProjectDir(async (dir) => {
+      const bundles: Bundles = {
+        profiles: [
+          profile({ name: "some-profile", keywords: ["some-kw"] }),
+          profile({ name: "different-profile", keywords: ["different-kw"] }),
+        ],
+      };
+      writeBundles(dir, bundles);
+
+      const { handlers, commands, notifications, statuses, ctx } = await installExtension(dir);
+
+      await commands["profile"]!.handler("some-profile --once", ctx);
+
+      // Bare /profile should mention the pending once-pin.
+      notifications.length = 0;
+      await commands["profile"]!.handler("", ctx);
+      assert.ok(
+        notifications.some((n) => n.msg.includes("Pending once-pin:")),
+        "bare /profile should surface the armed once-pin",
+      );
+
+      await commands["profile"]!.handler("clear", ctx);
+
+      // A subsequent prompt for a different profile must auto-classify cleanly.
+      await handlers["before_agent_start"]!({ prompt: "different-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ different-profile");
+
+      // Bare /profile should no longer mention a pending once-pin.
+      notifications.length = 0;
+      await commands["profile"]!.handler("", ctx);
+      assert.ok(
+        !notifications.some((n) => n.msg.includes("Pending once-pin:")),
+        "cleared once-pin must not still be reported as pending",
+      );
+    });
+  });
+
+  test("stale once-pinned profile removed before consumption still warns and auto-clears safely", async () => {
+    await withTempProjectDir(async (dir) => {
+      const bundles: Bundles = {
+        profiles: [
+          profile({ name: "pinned-once-profile", keywords: ["pin-kw"] }),
+          profile({ name: "other-profile", keywords: ["other-kw"] }),
+        ],
+      };
+      writeBundles(dir, bundles);
+
+      const { handlers, commands, notifications, statuses, ctx } = await installExtension(dir);
+
+      // Pin "pinned-once-profile" via /profile <name> --once.
+      await commands["profile"]!.handler("pinned-once-profile --once", ctx);
+
+      // Rewrite bundles.json: pinned-once-profile is gone, but a keyword-matching
+      // "other-profile" remains so auto-classification finds a real match.
+      writeBundles(dir, {
+        profiles: [profile({ name: "other-profile", keywords: ["other-kw"] })],
+      });
+
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "other-kw here", systemPrompt: [] }, ctx);
+
+      assert.equal(statuses["profile"], "⚙ other-profile", "must not append (manual) to an auto-classified profile");
+      assert.ok(
+        notifications.some((n) => n.msg.includes("no longer exists") && n.level === "warning"),
+        "must warn once that the stale once-pin was cleared",
+      );
+
+      // The pin must actually be cleared: a subsequent auto-classified prompt for a
+      // *different* profile must not still be treated as the stale override.
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "other-profile", keywords: ["other-kw"] }),
+          profile({ name: "third-profile", keywords: ["third-kw"] }),
+        ],
+      });
+      await handlers["before_agent_start"]!({ prompt: "third-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ third-profile", "cleared once-pin must not resurrect pinned profile or relabel");
+    });
+  });
+});
+
 describe("config-change notice", () => {
   test("first load is silent", async () => {
     await withTempProjectDir(async (dir) => {

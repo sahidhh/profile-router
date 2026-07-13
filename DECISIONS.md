@@ -524,3 +524,36 @@ here. Ordered roughly by the phase in which it arose.
     Malformed/missing config leaves `lastConfigHash` untouched (only updates on
     successful hash reads), so a transient read glitch never erases session-level
     hash memory.
+
+
+---
+
+## Phase 16 — Q6 turn-scoped --once pin
+
+39. **`--once` overwrites outright; no "previous pin" stack is remembered.**
+    `/profile <name> --once` sets `manualOverride = name` and `manualOverrideOnce = true`,
+    which simply overwrites whatever pin state existed before — a plain sticky pin, a
+    different once-pin, or nothing at all. There is deliberately no memory of a "previous"
+    pin to revert to once the once-pin is consumed: after it's applied to one prompt, both
+    variables clear and the session returns to full auto-classification, never back to
+    whatever plain pin (if any) was active before the once-pin was set. This is the
+    simplest correct semantics per the task's own instruction, and it matches how the
+    rest of this extension treats manual state — a single flat `manualOverride`, not a
+    stack — so introducing revert-to-previous behavior here would be an asymmetric
+    special case for one code path. **The once-flag is consumed (cleared) immediately
+    within the same `before_agent_start` turn that applies it**, not deferred to the start
+    of the next turn: as soon as `manualOverride` is found, matched against a real profile,
+    and used to force `matches`, `manualOverride`/`manualOverrideOnce` are reset to
+    null/false right there, before the rest of the handler (debug trace, status line,
+    model routing) runs. This guarantees the very next `before_agent_start` call sees
+    `manualOverride === null` and classifies normally — the once-pin cannot leak into the
+    next prompt's classification or its debug/trace labeling, because there is nothing
+    left to leak by the time that next call starts. Because the shared state is cleared
+    same-turn, the handler captures `overrideName`/`overrideWasOnce` as local turn-scoped
+    variables the moment the override is detected, and uses those (not the now-possibly-null
+    `manualOverride`/`manualOverrideOnce`) for every later reference in that same turn — the
+    debug-trace line and the status-line `(manual, once)` suffix both read from these locals,
+    never from the module-level variables post-clear. `/profile clear` was extended to reset
+    `manualOverrideOnce` too, so an armed-but-unconsumed once-pin can be cancelled outright,
+    and the bare `/profile` status notification surfaces a `Pending once-pin: <name>` line
+    whenever a once-pin is armed but hasn't yet been applied to a prompt.

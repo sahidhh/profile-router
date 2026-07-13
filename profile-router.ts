@@ -253,6 +253,7 @@ export function validateBundles(bundles: Bundles): string[] {
 export default function (pi: ExtensionAPI) {
   let active: MergedConfig | null = null;
   let manualOverride: string | null = null;        // set via /profile <name>
+  let manualOverrideOnce = false;                  // true when manualOverride is a turn-scoped pin (/profile <name> --once)
   let lastPrompt: string | null = null;             // tracks last classified prompt for /profile misroute
   let debugTrace = false;                          // toggled via /profile debug on|off
   const modelDecisions = new Map<string, boolean>(); // "from→to" -> user's answer, for this session
@@ -282,18 +283,29 @@ export default function (pi: ExtensionAPI) {
 
     let matches = classify(event.prompt, bundles);
     let overrideApplied = false;
+    let overrideWasOnce = false;
+    let overrideName: string | null = null;
 
     if (manualOverride) {
       const p = bundles.profiles.find((x) => x.name === manualOverride);
       if (p) {
         matches = [{ profile: p, score: Number.POSITIVE_INFINITY }];
         overrideApplied = true;
+        overrideWasOnce = manualOverrideOnce;
+        overrideName = manualOverride;
+        if (manualOverrideOnce) {
+          // Turn-scoped pin: consumed by this prompt, clear immediately so it
+          // cannot leak into the next prompt's classification or labeling.
+          manualOverride = null;
+          manualOverrideOnce = false;
+        }
       } else {
         // The pinned profile no longer exists (renamed/removed in bundles.json).
         // Clear the stale pin rather than silently falling back to auto-classification
         // while still labeling it as manually overridden.
         ctx.ui.notify(`Profile override "${manualOverride}" no longer exists — clearing pin, resuming auto-classification`, "warning");
         manualOverride = null;
+        manualOverrideOnce = false;
       }
     }
 
@@ -310,7 +322,7 @@ export default function (pi: ExtensionAPI) {
     if (debugTrace) {
       const lines: string[] = [`🔎 Profile routing for "${event.prompt.slice(0, 60)}${event.prompt.length > 60 ? "…" : ""}"`];
       if (overrideApplied) {
-        lines.push(`  → ${manualOverride} (manual pin — classification bypassed)`);
+        lines.push(`  → ${overrideName} (manual pin${overrideWasOnce ? ", once" : ""} — classification bypassed)`);
       } else {
         const rows = explain(event.prompt, bundles);
         lines.push(...formatTraceLines(rows));
@@ -322,7 +334,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus(
       "profile",
       next.matched.length
-        ? `⚙ ${next.matched.map((m) => m.name).join("+")}${overrideApplied ? " (manual)" : ""}`
+        ? `⚙ ${next.matched.map((m) => m.name).join("+")}${overrideApplied ? (overrideWasOnce ? " (manual, once)" : " (manual)") : ""}`
         : "⚙ default",
     );
 
@@ -473,6 +485,7 @@ export default function (pi: ExtensionAPI) {
 
       if (arg === "clear") {
         manualOverride = null;
+        manualOverrideOnce = false;
         ctx.ui.notify("Profile override cleared — auto-classification resumed", "info");
         return;
       }
@@ -614,6 +627,22 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // ---- /profile <name> --once : turn-scoped pin, auto-clears after one prompt ----
+      const onceMatch = /^(.+?)\s+--once$/.exec(arg);
+      if (onceMatch) {
+        const name = onceMatch[1]!;
+        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+        if (!bundles.profiles.some((p) => p.name === name)) {
+          ctx.ui.notify(`No profile named "${name}" in bundles.json. Known: ${bundles.profiles.map((p) => p.name).join(", ") || "(none loaded)"}`, "error");
+          return;
+        }
+        manualOverride = name;
+        manualOverrideOnce = true;
+        manualPinsSet++;
+        ctx.ui.notify(`Profile pinned to "${name}" for the next prompt only (--once)`, "info");
+        return;
+      }
+
       if (arg) {
         const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
         if (!bundles.profiles.some((p) => p.name === arg)) {
@@ -621,15 +650,17 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         manualOverride = arg;
+        manualOverrideOnce = false;
         manualPinsSet++;
         ctx.ui.notify(`Profile pinned to "${arg}" until /profile clear`, "info");
         return;
       }
+      const pendingNote = manualOverrideOnce ? `\nPending once-pin: ${manualOverride} (applies to the next prompt only)` : "";
       ctx.ui.notify(
-        active
+        (active
           ? `Active: ${active.matched.map((m) => `${m.name}(${m.score})`).join(", ") || "default"}\n` +
               `Model: ${modelStr(active.model)} | Thinking: ${active.thinkingLevel ?? "unset"} | Disabled agents: ${active.disabledAgents.join(", ") || "none"}`
-          : "No classification yet — send a prompt first",
+          : "No classification yet — send a prompt first") + pendingNote,
         "info",
       );
     },
