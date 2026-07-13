@@ -79,6 +79,7 @@ context.
     showing how it would classify without sending it or changing any session state.
   - `/profile validate` — structural check of `bundles.json` (duplicate names,
     empty keywords, bad `thinkingLevel`/`model`) without sending a prompt.
+  - `/profile stats` — session counters: prompts classified per profile (including default), manual pins set, model switches accepted/declined.
   - `/profile misroute [expected-profile]` — logs the last classified prompt
     (truncated to 500 chars), what it matched, and (optionally) what profile
     you expected, as one JSON line appended to `.omp/misroutes.jsonl`. Useful

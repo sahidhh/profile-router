@@ -387,6 +387,12 @@ here. Ordered roughly by the phase in which it arose.
 
 ---
 
+## Phase 13 — Q3 /profile stats
+
+36. **Session counters: what counts, when to count, and sort order.** Added four module-level session counters (`promptsClassified` Map, `manualPinsSet`/`modelSwitchesAccepted`/`modelSwitchesDeclined` integers) incremented at classification, pin, and model-routing decision points. **Classification counting**: multi-match prompts increment the counter for *every* matched profile name, not just the winner, because each matched profile contributes to the merged config (rules union, tool union, etc.). Single-profile matches increment that name; no-match prompts increment "default". **Model-switch counting**: increments fire *every time* a switch decision is applied this turn, including cached decisions from prior turns (retrieved from `modelDecisions` map). This counts every actual switch-or-reject event from the user's perspective, not just first-time decisions. **Sort order**: `promptsClassified` entries sorted by count descending (highest-count profiles first), breaking ties with no stable secondary sort — the order of insertion is deterministic across runs because `classify()` always processes profiles in declaration order. `/profile stats` notifies the exact message `"no prompts classified yet"` when all counters are zero (no activity), preventing confusion between "stats not generated yet" and "stats generated and all zero"; on activity, one multi-line `ctx.ui.notify` displays the stats table in a compact format with profile names and counts, then manual pins and model switch totals.
+
+---
+
 ## Phase 9 — T2 rule-union contradiction fix
 
 31. **Rule-language reworded to describe working-style, not permission/prohibition.** 

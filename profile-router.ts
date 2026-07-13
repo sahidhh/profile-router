@@ -237,6 +237,10 @@ export default function (pi: ExtensionAPI) {
   let debugTrace = false;                          // toggled via /profile debug on|off
   const modelDecisions = new Map<string, boolean>(); // "from→to" -> user's answer, for this session
   const unresolvedModelWarned = new Set<string>();   // model strings already warned about this session
+  const promptsClassified = new Map<string, number>(); // profile name (or "default") -> count
+  let manualPinsSet = 0;
+  let modelSwitchesAccepted = 0;
+  let modelSwitchesDeclined = 0;
 
   const debugLog = (msg: string, context?: Record<string, unknown>) => {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
@@ -266,6 +270,10 @@ export default function (pi: ExtensionAPI) {
 
     const next = merge(matches, bundles);
     active = next;
+
+    // Increment promptsClassified counter for each matched profile, or "default" if none matched
+    const namesToCount = next.matched.length ? next.matched.map((m) => m.name) : ["default"];
+    for (const n of namesToCount) promptsClassified.set(n, (promptsClassified.get(n) ?? 0) + 1);
 
     debugLog("classified", { prompt: event.prompt.slice(0, 80), matched: next.matched });
 
@@ -317,10 +325,13 @@ export default function (pi: ExtensionAPI) {
             modelDecisions.set(key, approved);
           }
           if (approved) {
+            modelSwitchesAccepted++;
             const ok = await pi.setModel(resolved);
             if (!ok) {
               ctx.ui.notify(`No credentials available for ${resolved.provider}/${resolved.id} — run /model ${resolvedSpec} manually`, "warning");
             }
+          } else {
+            modelSwitchesDeclined++;
           }
         }
       } else {
@@ -486,6 +497,32 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // ---- /profile stats : session counters ----
+      if (sub === "stats") {
+        const hasActivity =
+          promptsClassified.size > 0 || manualPinsSet > 0 || modelSwitchesAccepted > 0 || modelSwitchesDeclined > 0;
+
+        if (!hasActivity) {
+          ctx.ui.notify("no prompts classified yet", "info");
+          return;
+        }
+
+        const lines: string[] = ["Profile stats (this session):"];
+
+        // Build and sort profiles by count descending
+        const profileStats = Array.from(promptsClassified.entries()).sort((a, b) => b[1] - a[1]);
+        for (const [name, count] of profileStats) {
+          lines.push(`  ${name}: ${count}`);
+        }
+
+        lines.push(`Manual pins set: ${manualPinsSet}`);
+        lines.push(`Model switches accepted: ${modelSwitchesAccepted}`);
+        lines.push(`Model switches declined: ${modelSwitchesDeclined}`);
+
+        ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+
       // ---- /profile misroute [expected-profile] : log misclassifications to .omp/misroutes.jsonl ----
       if (sub === "misroute") {
         if (!lastPrompt) {
@@ -528,6 +565,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         manualOverride = arg;
+        manualPinsSet++;
         ctx.ui.notify(`Profile pinned to "${arg}" until /profile clear`, "info");
         return;
       }

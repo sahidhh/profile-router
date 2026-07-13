@@ -972,6 +972,82 @@ describe("/profile misroute", () => {
   });
 });
 
+describe("/profile stats", () => {
+  test("zero activity -> exact 'no prompts classified yet' info message", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })] });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("stats", ctx);
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0]!.level, "info");
+      assert.equal(notifications[0]!.msg, "no prompts classified yet");
+    });
+  });
+
+  test("counts prompts per profile (including default) and manual pins across driven turns", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["alpha-kw"] }),
+          profile({ name: "beta", keywords: ["beta-kw"] }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      // Two prompts matching "alpha", one totally unmatched prompt -> "default".
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw please", systemPrompt: [] }, ctx);
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw again", systemPrompt: [] }, ctx);
+      await handlers["before_agent_start"]!({ prompt: "completely unrelated gibberish", systemPrompt: [] }, ctx);
+
+      // One successful manual pin.
+      await commands["profile"]!.handler("beta", ctx);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("stats", ctx);
+
+      assert.equal(notifications.length, 1);
+      const msg = notifications[0]!;
+      assert.equal(msg.level, "info");
+      assert.ok(msg.msg.includes("alpha: 2"), `expected "alpha: 2" in stats, got: ${msg.msg}`);
+      assert.ok(msg.msg.includes("default: 1"), `expected "default: 1" in stats, got: ${msg.msg}`);
+      assert.ok(msg.msg.includes("Manual pins set: 1"), `expected "Manual pins set: 1" in stats, got: ${msg.msg}`);
+      assert.ok(msg.msg.includes("Model switches accepted: 0"), `expected model switch counters at 0, got: ${msg.msg}`);
+      assert.ok(msg.msg.includes("Model switches declined: 0"), `expected model switch counters at 0, got: ${msg.msg}`);
+    });
+  });
+
+  test("model switch counters increment on accepted and declined confirm decisions (bonus)", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "chain-profile", keywords: ["chain-kw"], model: "anthropic/claude-sonnet-5" })],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+      const sonnet = { id: "claude-sonnet-5", provider: "anthropic", name: "Sonnet" };
+      const opus = { id: "claude-opus-4-8", provider: "anthropic", name: "Opus" };
+      ctx.models.resolve = ((spec: string) => (spec === "anthropic/claude-sonnet-5" ? sonnet : undefined)) as never;
+
+      // First turn: current model differs from resolved -> a switch is proposed; fake confirm defaults to true -> accepted.
+      await handlers["before_agent_start"]!({ prompt: "chain-kw here", systemPrompt: [] }, ctx);
+
+      // Second turn: force a *different* current model (so `changed` is true again, a fresh from->to
+      // key) and make ctx.ui.confirm resolve false -> declined.
+      ctx.ui.confirm = async () => false;
+      ctx.model = opus as never;
+      await handlers["before_agent_start"]!({ prompt: "chain-kw once more", systemPrompt: [] }, ctx);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("stats", ctx);
+      const statsMsg = notifications.find((n) => n.msg.startsWith("Profile stats"));
+      assert.ok(statsMsg, "expected a stats notification");
+      assert.ok(statsMsg!.msg.includes("Model switches accepted: 1"), `expected 1 accepted switch, got: ${statsMsg!.msg}`);
+      assert.ok(statsMsg!.msg.includes("Model switches declined: 1"), `expected 1 declined switch, got: ${statsMsg!.msg}`);
+    });
+  });
+});
+
 // ---------- T5: larger, realistic regression fixture (paraphrases, near-misses, multi-match) ----------
 
 describe("routing-expectations fixture: semantic-overlap regression", () => {
