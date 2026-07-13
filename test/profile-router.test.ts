@@ -271,6 +271,34 @@ describe("validateBundles", () => {
   });
 });
 
+// ---------- bundles.schema.json ----------
+
+describe("bundles.schema.json", () => {
+  test("schema file is valid JSON with correct top-level structure", () => {
+    const schemaPath = path.join(import.meta.dirname, "..", "bundles.schema.json");
+    const schemaContent = fs.readFileSync(schemaPath, "utf-8");
+    const schema = JSON.parse(schemaContent);
+
+    assert.equal(schema.type, "object");
+    assert.ok(schema.required);
+    assert.ok(schema.required.includes("profiles"));
+  });
+
+  test("real bundles.json parses and validateBundles returns no problems", () => {
+    const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+    const bundlesContent = fs.readFileSync(bundlesPath, "utf-8");
+    const bundles = JSON.parse(bundlesContent) as Bundles;
+
+    // Verify the file loaded successfully with expected structure
+    assert.ok(Array.isArray(bundles.profiles));
+    assert.ok(bundles.profiles.length > 0);
+
+    // Verify validateBundles finds no problems
+    const problems = validateBundles(bundles);
+    assert.deepEqual(problems, [], `expected no validation problems, got: ${problems.join("; ")}`);
+  });
+});
+
 // ---------- loadBundles() ----------
 
 describe("loadBundles", () => {
@@ -551,6 +579,210 @@ describe("F2 regression: stale /profile override never mislabels an auto-classif
       });
       await handlers["before_agent_start"]!({ prompt: "third-kw here", systemPrompt: [] }, ctx);
       assert.equal(statuses["profile"], "⚙ third-profile", "cleared pin must not resurrect pinned-profile or relabel");
+    });
+  });
+});
+
+describe("turn-scoped --once pin", () => {
+  test("once-pin routes exactly one prompt then auto-clears", async () => {
+    await withTempProjectDir(async (dir) => {
+      const bundles: Bundles = {
+        profiles: [
+          profile({ name: "once-target", keywords: ["once-kw"] }),
+          profile({ name: "other-profile", keywords: ["other-kw"] }),
+        ],
+      };
+      writeBundles(dir, bundles);
+
+      const { handlers, commands, statuses, ctx } = await installExtension(dir);
+
+      await commands["profile"]!.handler("once-target --once", ctx);
+
+      // Prompt would normally match other-profile, but the once-pin must win.
+      await handlers["before_agent_start"]!({ prompt: "other-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ once-target (manual, once)");
+    });
+  });
+
+  test("following prompt after a consumed once-pin is auto-classified and NOT labeled manual", async () => {
+    await withTempProjectDir(async (dir) => {
+      const bundles: Bundles = {
+        profiles: [
+          profile({ name: "once-target", keywords: ["once-kw"] }),
+          profile({ name: "other-profile", keywords: ["other-kw"] }),
+        ],
+      };
+      writeBundles(dir, bundles);
+
+      const { handlers, commands, statuses, ctx } = await installExtension(dir);
+
+      await commands["profile"]!.handler("once-target --once", ctx);
+
+      // First prompt consumes the once-pin.
+      await handlers["before_agent_start"]!({ prompt: "other-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ once-target (manual, once)");
+
+      // Second prompt must be auto-classified and NOT labeled manual.
+      await handlers["before_agent_start"]!({ prompt: "other-kw again", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ other-profile");
+    });
+  });
+
+  test("/profile clear removes an armed-but-unused once-pin", async () => {
+    await withTempProjectDir(async (dir) => {
+      const bundles: Bundles = {
+        profiles: [
+          profile({ name: "some-profile", keywords: ["some-kw"] }),
+          profile({ name: "different-profile", keywords: ["different-kw"] }),
+        ],
+      };
+      writeBundles(dir, bundles);
+
+      const { handlers, commands, notifications, statuses, ctx } = await installExtension(dir);
+
+      await commands["profile"]!.handler("some-profile --once", ctx);
+
+      // Bare /profile should mention the pending once-pin.
+      notifications.length = 0;
+      await commands["profile"]!.handler("", ctx);
+      assert.ok(
+        notifications.some((n) => n.msg.includes("Pending once-pin:")),
+        "bare /profile should surface the armed once-pin",
+      );
+
+      await commands["profile"]!.handler("clear", ctx);
+
+      // A subsequent prompt for a different profile must auto-classify cleanly.
+      await handlers["before_agent_start"]!({ prompt: "different-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ different-profile");
+
+      // Bare /profile should no longer mention a pending once-pin.
+      notifications.length = 0;
+      await commands["profile"]!.handler("", ctx);
+      assert.ok(
+        !notifications.some((n) => n.msg.includes("Pending once-pin:")),
+        "cleared once-pin must not still be reported as pending",
+      );
+    });
+  });
+
+  test("stale once-pinned profile removed before consumption still warns and auto-clears safely", async () => {
+    await withTempProjectDir(async (dir) => {
+      const bundles: Bundles = {
+        profiles: [
+          profile({ name: "pinned-once-profile", keywords: ["pin-kw"] }),
+          profile({ name: "other-profile", keywords: ["other-kw"] }),
+        ],
+      };
+      writeBundles(dir, bundles);
+
+      const { handlers, commands, notifications, statuses, ctx } = await installExtension(dir);
+
+      // Pin "pinned-once-profile" via /profile <name> --once.
+      await commands["profile"]!.handler("pinned-once-profile --once", ctx);
+
+      // Rewrite bundles.json: pinned-once-profile is gone, but a keyword-matching
+      // "other-profile" remains so auto-classification finds a real match.
+      writeBundles(dir, {
+        profiles: [profile({ name: "other-profile", keywords: ["other-kw"] })],
+      });
+
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "other-kw here", systemPrompt: [] }, ctx);
+
+      assert.equal(statuses["profile"], "⚙ other-profile", "must not append (manual) to an auto-classified profile");
+      assert.ok(
+        notifications.some((n) => n.msg.includes("no longer exists") && n.level === "warning"),
+        "must warn once that the stale once-pin was cleared",
+      );
+
+      // The pin must actually be cleared: a subsequent auto-classified prompt for a
+      // *different* profile must not still be treated as the stale override.
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "other-profile", keywords: ["other-kw"] }),
+          profile({ name: "third-profile", keywords: ["third-kw"] }),
+        ],
+      });
+      await handlers["before_agent_start"]!({ prompt: "third-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ third-profile", "cleared once-pin must not resurrect pinned profile or relabel");
+    });
+  });
+});
+
+describe("config-change notice", () => {
+  test("first load is silent", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })] });
+      const { handlers, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw here", systemPrompt: [] }, ctx);
+
+      assert.equal(
+        notifications.filter((n) => n.msg.includes("bundles.json changed")).length,
+        0,
+        "first load should not emit a change notice",
+      );
+    });
+  });
+
+  test("changed content notifies once with 12-hex hash", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })] });
+      const { handlers, notifications, ctx } = await installExtension(dir);
+
+      // First load (silent)
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw first", systemPrompt: [] }, ctx);
+      assert.equal(
+        notifications.filter((n) => n.msg.includes("bundles.json changed")).length,
+        0,
+        "first load should be silent",
+      );
+
+      // Rewrite with different content
+      writeBundles(dir, { profiles: [profile({ name: "beta", keywords: ["beta-kw"] })] });
+
+      // Second load with changed content
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "beta-kw second", systemPrompt: [] }, ctx);
+
+      const changeNotice = notifications.find((n) => n.msg.includes("bundles.json changed"));
+      assert.ok(changeNotice, "should emit a change notice");
+      assert.equal(changeNotice!.level, "info", "change notice should be at info level");
+      assert.ok(
+        /bundles\.json changed \([0-9a-f]{12}\) — applied/.test(changeNotice!.msg),
+        `message should match pattern, got: ${changeNotice!.msg}`,
+      );
+    });
+  });
+
+  test("unchanged content is silent on reload", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })] });
+      const { handlers, notifications, ctx } = await installExtension(dir);
+
+      // First load (silent)
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw first", systemPrompt: [] }, ctx);
+
+      // Change and reload to set lastConfigHash
+      writeBundles(dir, { profiles: [profile({ name: "beta", keywords: ["beta-kw"] })] });
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "beta-kw second", systemPrompt: [] }, ctx);
+      assert.ok(
+        notifications.some((n) => n.msg.includes("bundles.json changed")),
+        "second load should notify change",
+      );
+
+      // Third load without changing the file
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "beta-kw third", systemPrompt: [] }, ctx);
+      assert.equal(
+        notifications.filter((n) => n.msg.includes("bundles.json changed")).length,
+        0,
+        "unchanged content should not emit a notice on reload",
+      );
     });
   });
 });
@@ -848,6 +1080,255 @@ describe("/profile explain", () => {
       assert.equal(msg.level, "warning");
       assert.ok(msg.msg.includes("Usage"), "should show usage");
       assert.ok(msg.msg.includes("/profile explain"), "should mention the command");
+    });
+  });
+});
+
+describe("/profile misroute", () => {
+  test("after a prompt is classified, /profile misroute writes correct JSON shape to .omp/misroutes.jsonl", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["alpha-kw"] }),
+          profile({ name: "beta", keywords: ["beta-kw"] }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      // Classify a prompt first
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw test prompt", systemPrompt: [] }, ctx);
+
+      // Now log a misroute
+      notifications.length = 0;
+      await commands["profile"]!.handler("misroute beta", ctx);
+
+      // Verify file was created and contains the correct JSON
+      const logPath = path.join(dir, ".omp", "misroutes.jsonl");
+      assert.ok(fs.existsSync(logPath), "misroutes.jsonl should exist");
+
+      const content = fs.readFileSync(logPath, "utf-8");
+      const lines = content.trim().split("\n");
+      assert.equal(lines.length, 1, "should have exactly one line");
+
+      const entry = JSON.parse(lines[0]!);
+      assert.ok(entry.ts, "ts field should be present");
+      assert.ok(new Date(entry.ts).getTime(), "ts should be a valid ISO8601 date");
+      assert.equal(entry.prompt, "alpha-kw test prompt", "prompt should match");
+      assert.deepEqual(entry.matched, ["alpha"], "matched should contain matched profile names");
+      assert.equal(entry.expected, "beta", "expected should be the provided profile name");
+
+      // Verify success notification
+      assert.ok(
+        notifications.some((n) => n.level === "info" && n.msg.includes("misroutes.jsonl")),
+        "should emit info notification with path",
+      );
+    });
+  });
+
+  test("/profile misroute with unknown expected-profile emits error notification and does not write file", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "known-profile", keywords: ["kw"] })],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      // Classify first
+      await handlers["before_agent_start"]!({ prompt: "kw here", systemPrompt: [] }, ctx);
+
+      // Try to misroute with unknown profile
+      notifications.length = 0;
+      await commands["profile"]!.handler("misroute unknown-profile", ctx);
+
+      // Should emit error
+      assert.ok(
+        notifications.some((n) => n.level === "error" && n.msg.includes("unknown-profile")),
+        "should emit error for unknown profile",
+      );
+
+      // File should NOT be created
+      const logPath = path.join(dir, ".omp", "misroutes.jsonl");
+      assert.equal(fs.existsSync(logPath), false, "misroutes.jsonl should not be created on error");
+    });
+  });
+
+  test("/profile misroute with no prior classification emits warning and does not write file", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "test", keywords: ["kw"] })],
+      });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      // Call misroute without any prior classification
+      notifications.length = 0;
+      await commands["profile"]!.handler("misroute", ctx);
+
+      // Should emit warning
+      assert.ok(
+        notifications.some((n) => n.level === "warning" && n.msg === "nothing to log"),
+        "should emit warning when no prompt classified",
+      );
+
+      // File should NOT be created
+      const logPath = path.join(dir, ".omp", "misroutes.jsonl");
+      assert.equal(fs.existsSync(logPath), false, "misroutes.jsonl should not be created when no prompt");
+    });
+  });
+});
+
+describe("/profile stats", () => {
+  test("zero activity -> exact 'no prompts classified yet' info message", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })] });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("stats", ctx);
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0]!.level, "info");
+      assert.equal(notifications[0]!.msg, "no prompts classified yet");
+    });
+  });
+
+  test("counts prompts per profile (including default) and manual pins across driven turns", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["alpha-kw"] }),
+          profile({ name: "beta", keywords: ["beta-kw"] }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      // Two prompts matching "alpha", one totally unmatched prompt -> "default".
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw please", systemPrompt: [] }, ctx);
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw again", systemPrompt: [] }, ctx);
+      await handlers["before_agent_start"]!({ prompt: "completely unrelated gibberish", systemPrompt: [] }, ctx);
+
+      // One successful manual pin.
+      await commands["profile"]!.handler("beta", ctx);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("stats", ctx);
+
+      assert.equal(notifications.length, 1);
+      const msg = notifications[0]!;
+      assert.equal(msg.level, "info");
+      assert.ok(msg.msg.includes("alpha: 2"), `expected "alpha: 2" in stats, got: ${msg.msg}`);
+      assert.ok(msg.msg.includes("default: 1"), `expected "default: 1" in stats, got: ${msg.msg}`);
+      assert.ok(msg.msg.includes("Manual pins set: 1"), `expected "Manual pins set: 1" in stats, got: ${msg.msg}`);
+      assert.ok(msg.msg.includes("Model switches accepted: 0"), `expected model switch counters at 0, got: ${msg.msg}`);
+      assert.ok(msg.msg.includes("Model switches declined: 0"), `expected model switch counters at 0, got: ${msg.msg}`);
+    });
+  });
+
+  test("model switch counters increment on accepted and declined confirm decisions (bonus)", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "chain-profile", keywords: ["chain-kw"], model: "anthropic/claude-sonnet-5" })],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+      const sonnet = { id: "claude-sonnet-5", provider: "anthropic", name: "Sonnet" };
+      const opus = { id: "claude-opus-4-8", provider: "anthropic", name: "Opus" };
+      ctx.models.resolve = ((spec: string) => (spec === "anthropic/claude-sonnet-5" ? sonnet : undefined)) as never;
+
+      // First turn: current model differs from resolved -> a switch is proposed; fake confirm defaults to true -> accepted.
+      await handlers["before_agent_start"]!({ prompt: "chain-kw here", systemPrompt: [] }, ctx);
+
+      // Second turn: force a *different* current model (so `changed` is true again, a fresh from->to
+      // key) and make ctx.ui.confirm resolve false -> declined.
+      ctx.ui.confirm = async () => false;
+      ctx.model = opus as never;
+      await handlers["before_agent_start"]!({ prompt: "chain-kw once more", systemPrompt: [] }, ctx);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("stats", ctx);
+      const statsMsg = notifications.find((n) => n.msg.startsWith("Profile stats"));
+      assert.ok(statsMsg, "expected a stats notification");
+      assert.ok(statsMsg!.msg.includes("Model switches accepted: 1"), `expected 1 accepted switch, got: ${statsMsg!.msg}`);
+      assert.ok(statsMsg!.msg.includes("Model switches declined: 1"), `expected 1 declined switch, got: ${statsMsg!.msg}`);
+    });
+  });
+});
+
+describe("/profile rules", () => {
+  test("after classifying a profile with rules and skills, /profile rules notifies the exact injection block string", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({
+            name: "test-profile",
+            keywords: ["test-kw"],
+            rules: ["test-rule-one", "test-rule-two"],
+            skills: ["test-skill"],
+          }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      // Classify a prompt with the profile
+      const beforeAgentStartResult = (await handlers["before_agent_start"]!({ prompt: "test-kw here", systemPrompt: [] }, ctx)) as
+        | { systemPrompt?: string[] }
+        | undefined;
+      assert.ok(beforeAgentStartResult?.systemPrompt, "before_agent_start should return a systemPrompt array");
+      const injectedBlock = beforeAgentStartResult.systemPrompt![beforeAgentStartResult.systemPrompt!.length - 1];
+
+      // Now call /profile rules and verify the exact string matches
+      notifications.length = 0;
+      await commands["profile"]!.handler("rules", ctx);
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0]!.level, "info");
+      assert.equal(
+        notifications[0]!.msg,
+        injectedBlock,
+        "the /profile rules output must exactly match what before_agent_start injected",
+      );
+    });
+  });
+
+  test("active === null (no classification yet) -> notifies 'No classification yet — send a prompt first'", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "test", keywords: ["test-kw"] })] });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("rules", ctx);
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0]!.level, "info");
+      assert.equal(notifications[0]!.msg, "No classification yet — send a prompt first");
+    });
+  });
+
+  test("profile with empty rules and empty skills -> notifies explicit 'no rules or skills declared' message", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({
+            name: "norules",
+            keywords: ["norules-kw"],
+            rules: [],
+            skills: [],
+          }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      // Classify a prompt first
+      await handlers["before_agent_start"]!({ prompt: "norules-kw here", systemPrompt: [] }, ctx);
+
+      // Now call /profile rules
+      notifications.length = 0;
+      await commands["profile"]!.handler("rules", ctx);
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0]!.level, "info");
+      assert.ok(
+        notifications[0]!.msg.includes("No rules or skills declared for the active profile (norules)"),
+        `expected explicit message, got: ${notifications[0]!.msg}`,
+      );
     });
   });
 });

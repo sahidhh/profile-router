@@ -22,6 +22,7 @@ prompt ──► classify (keywords, no LLM) ──► merge matched profiles �
 |---|---|
 | `profile-router.ts` | The whole extension — one file, Node built-ins only |
 | `bundles.json` | The profile table (the part you edit) |
+| `bundles.schema.json` | JSON Schema for `bundles.json` — provides editor validation/autocomplete via the `$schema` key |
 | `MANUAL.md` | Install paths, schema reference, runtime behavior, troubleshooting |
 | `API-FINDINGS.md` | file:line evidence for every OMP API the extension calls |
 | `DECISIONS.md` | Every autonomous judgment call, numbered and justified |
@@ -67,7 +68,9 @@ context.
 - **Let keywords do the routing; pin only for exceptions.** `/profile <name>`
   pins, `/profile clear` unpins, `/profile` shows scores. The status line
   (`⚙ lookup`) always shows what matched — glance at it before the model
-  starts spending tokens.
+  starts spending tokens. Add `--once` (`/profile <name> --once`) to pin for
+  just the next prompt — it auto-clears immediately after that one prompt is
+  classified, so you don't have to remember to `/profile clear` afterward.
 - **Discover and debug with the `/profile` subcommands:**
   - `/profile list` — every profile with its one-line description, model, and
     thinking level.
@@ -78,13 +81,22 @@ context.
     showing how it would classify without sending it or changing any session state.
   - `/profile validate` — structural check of `bundles.json` (duplicate names,
     empty keywords, bad `thinkingLevel`/`model`) without sending a prompt.
+  - `/profile stats` — session counters: prompts classified per profile (including default), manual pins set, model switches accepted/declined.
+  - `/profile rules` — prints the exact rules/skills block currently being injected into the system prompt for the active profile.
+  - `/profile misroute [expected-profile]` — logs the last classified prompt
+    (truncated to 500 chars), what it matched, and (optionally) what profile
+    you expected, as one JSON line appended to `.omp/misroutes.jsonl`. Useful
+    for building a corpus of misclassifications to fix later.
 - **Phrase prompts with trigger vocabulary.** "summarize how auth works"
   routes to the cheap model; "investigate why auth breaks" routes to Sonnet
   with root-cause rules. The keyword table *is* the API.
 - **Edit `bundles.json`, not the extension.** JSON is the only authoring path
   — there is no add/edit command, by design (it's git-diffable and testable).
   It's re-read from disk on every prompt — changes apply on the next prompt, no
-  restart. Run `/profile validate` (or `npm test`) after editing to catch
+  restart. After the first prompt in a session, if the extension detects that
+  `bundles.json` content has changed, it notifies once with the new content hash
+  (a short 12-hex fingerprint), so you can see when config edits take effect.
+  Run `/profile validate` (or `npm test`) after editing to catch
   mistakes. Add an optional `description` to each profile for a friendly
   `/profile list`.
 - **Run `npm test` after editing profiles.** The reachability suite fails

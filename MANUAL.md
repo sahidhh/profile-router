@@ -176,7 +176,14 @@ context.
 On **every** prompt submission (`before_agent_start`):
 
 1. `bundles.json` is read fresh from disk (project path checked first, then
-   global) — edits take effect on the next prompt, no restart needed.
+   global) — edits take effect on the next prompt, no restart needed. After the
+   first prompt in a session, if the file's raw content changes (detected via a
+   sha256 content hash), the extension notifies once with the notification message
+   format `bundles.json changed (<12-hex-hash>) — applied` at `info` level — this
+   tells you when your edits take effect. If the file is missing or unreadable, no
+   notification fires (the notification only fires on detected *changes*, not on
+   transient read errors; any prior hash state is preserved until a successful
+   read occurs).
 2. The prompt text is lowercased and matched against every profile's
    `keywords` with word-boundary regexes (`\bkeyword\b`), so `"fix"` won't
    match inside `"prefix"`. Each hit is worth 1 point per matched keyword.
@@ -233,8 +240,17 @@ On **every** prompt submission (`before_agent_start`):
 - `/profile <name>` — pin classification to a single named profile until
   cleared. Rejects unknown names with the list of profiles actually loaded
   from `bundles.json` (helps catch typos immediately, never silently no-ops).
-- `/profile clear` — remove the pin and resume automatic keyword
-  classification on the next prompt.
+- `/profile <name> --once` — pin classification to a single named profile for
+  exactly the next classified prompt, then auto-clear immediately — no need
+  to remember `/profile clear` afterward. Same unknown-name validation as the
+  plain pin. Setting a `--once` pin overwrites any existing pin outright
+  (plain or once) — there is no stack of pins to revert to; after the pin is
+  consumed, the session returns to full auto-classification. `/profile clear`
+  also removes an armed-but-unused `--once` pin. While a `--once` pin is
+  applied, the status line shows `(manual, once)` for that one turn only; the
+  following prompt is classified normally with no manual suffix.
+- `/profile clear` — remove the pin (plain or `--once`) and resume automatic
+  keyword classification on the next prompt.
 - `/profile list` — list every profile loaded from `bundles.json` with its
   `description` (or, if none, its keywords), model, and thinking level. The
   quickest way to see what's available.
@@ -250,6 +266,18 @@ On **every** prompt submission (`before_agent_start`):
   duplicate profile names, missing/empty `keywords`, unknown `thinkingLevel`,
   and malformed `model`. Reports `✓ valid` or an itemized list of problems —
   no prompt needed.
+- `/profile rules` — prints the exact rules/skills block currently being injected
+  into the system prompt for the active profile. Reuses the same injection logic
+  as `before_agent_start`, so what you see is exactly what gets injected into
+  each prompt.
+- `/profile misroute [expected-profile]` — logs the last classified prompt
+  (truncated to 500 chars), the profiles it matched, and (optionally) the
+  profile you expected it to match, as a single JSON line appended to
+  `.omp/misroutes.jsonl` (created if not present). Requires at least one
+  prompt to have been classified in this session. If `[expected-profile]` is
+  provided, it must be a known profile name; unknown names are rejected with
+  the same error message as `/profile <unknown-name>`. Useful for collecting
+  misclassification examples to analyze and fix keyword collisions.
 
 ---
 

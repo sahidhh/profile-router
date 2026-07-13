@@ -19,6 +19,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import * as crypto from "node:crypto";
 
 // ---------- Types (mirror bundles.json schema) ----------
 
@@ -76,6 +77,25 @@ export function loadBundles(cwd: string, notify?: (msg: string) => void): Bundle
     }
   }
   return { profiles: [] };
+}
+
+/**
+ * Compute a short content hash (sha256, first 12 hex chars) of the first-existing
+ * bundles.json candidate without re-implementing config loading.
+ * Returns null if no file is found or if a read error occurs.
+ */
+function configContentHash(cwd: string): string | null {
+  const candidates = [path.join(cwd, ".omp", "bundles.json"), path.join(os.homedir(), ".omp", "bundles.json")];
+  for (const p of candidates) {
+    if (!fs.existsSync(p)) continue;
+    try {
+      const raw = fs.readFileSync(p, "utf-8");
+      return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 12);
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 // ---------- Classification (keyword scoring, word-boundary matching) ----------
@@ -233,9 +253,16 @@ export function validateBundles(bundles: Bundles): string[] {
 export default function (pi: ExtensionAPI) {
   let active: MergedConfig | null = null;
   let manualOverride: string | null = null;        // set via /profile <name>
+  let manualOverrideOnce = false;                  // true when manualOverride is a turn-scoped pin (/profile <name> --once)
+  let lastPrompt: string | null = null;             // tracks last classified prompt for /profile misroute
   let debugTrace = false;                          // toggled via /profile debug on|off
   const modelDecisions = new Map<string, boolean>(); // "from→to" -> user's answer, for this session
   const unresolvedModelWarned = new Set<string>();   // model strings already warned about this session
+  const promptsClassified = new Map<string, number>(); // profile name (or "default") -> count
+  let manualPinsSet = 0;
+  let modelSwitchesAccepted = 0;
+  let modelSwitchesDeclined = 0;
+  let lastConfigHash: string | null = null;       // content hash from the most recent bundles.json load this session
 
   const debugLog = (msg: string, context?: Record<string, unknown>) => {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
@@ -244,26 +271,50 @@ export default function (pi: ExtensionAPI) {
   // ---- Every prompt: classify, merge, inject ----
   pi.on("before_agent_start", async (event, ctx) => {
     const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+    lastPrompt = event.prompt;
+
+    const currentHash = configContentHash(ctx.cwd);
+    if (currentHash !== null) {
+      if (lastConfigHash !== null && currentHash !== lastConfigHash) {
+        ctx.ui.notify(`bundles.json changed (${currentHash}) — applied`, "info");
+      }
+      lastConfigHash = currentHash;
+    }
 
     let matches = classify(event.prompt, bundles);
     let overrideApplied = false;
+    let overrideWasOnce = false;
+    let overrideName: string | null = null;
 
     if (manualOverride) {
       const p = bundles.profiles.find((x) => x.name === manualOverride);
       if (p) {
         matches = [{ profile: p, score: Number.POSITIVE_INFINITY }];
         overrideApplied = true;
+        overrideWasOnce = manualOverrideOnce;
+        overrideName = manualOverride;
+        if (manualOverrideOnce) {
+          // Turn-scoped pin: consumed by this prompt, clear immediately so it
+          // cannot leak into the next prompt's classification or labeling.
+          manualOverride = null;
+          manualOverrideOnce = false;
+        }
       } else {
         // The pinned profile no longer exists (renamed/removed in bundles.json).
         // Clear the stale pin rather than silently falling back to auto-classification
         // while still labeling it as manually overridden.
         ctx.ui.notify(`Profile override "${manualOverride}" no longer exists — clearing pin, resuming auto-classification`, "warning");
         manualOverride = null;
+        manualOverrideOnce = false;
       }
     }
 
     const next = merge(matches, bundles);
     active = next;
+
+    // Increment promptsClassified counter for each matched profile, or "default" if none matched
+    const namesToCount = next.matched.length ? next.matched.map((m) => m.name) : ["default"];
+    for (const n of namesToCount) promptsClassified.set(n, (promptsClassified.get(n) ?? 0) + 1);
 
     debugLog("classified", { prompt: event.prompt.slice(0, 80), matched: next.matched });
 
@@ -271,7 +322,7 @@ export default function (pi: ExtensionAPI) {
     if (debugTrace) {
       const lines: string[] = [`🔎 Profile routing for "${event.prompt.slice(0, 60)}${event.prompt.length > 60 ? "…" : ""}"`];
       if (overrideApplied) {
-        lines.push(`  → ${manualOverride} (manual pin — classification bypassed)`);
+        lines.push(`  → ${overrideName} (manual pin${overrideWasOnce ? ", once" : ""} — classification bypassed)`);
       } else {
         const rows = explain(event.prompt, bundles);
         lines.push(...formatTraceLines(rows));
@@ -283,7 +334,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus(
       "profile",
       next.matched.length
-        ? `⚙ ${next.matched.map((m) => m.name).join("+")}${overrideApplied ? " (manual)" : ""}`
+        ? `⚙ ${next.matched.map((m) => m.name).join("+")}${overrideApplied ? (overrideWasOnce ? " (manual, once)" : " (manual)") : ""}`
         : "⚙ default",
     );
 
@@ -315,10 +366,13 @@ export default function (pi: ExtensionAPI) {
             modelDecisions.set(key, approved);
           }
           if (approved) {
+            modelSwitchesAccepted++;
             const ok = await pi.setModel(resolved);
             if (!ok) {
               ctx.ui.notify(`No credentials available for ${resolved.provider}/${resolved.id} — run /model ${resolvedSpec} manually`, "warning");
             }
+          } else {
+            modelSwitchesDeclined++;
           }
         }
       } else {
@@ -345,18 +399,9 @@ export default function (pi: ExtensionAPI) {
     }
 
     // ---- Rules injection into system prompt for this agent run ----
-    const parts: string[] = [];
-    if (next.rules.length > 0) {
-      parts.push(
-        `## Active Engineering Rules (${next.matched.map((m) => m.name).join("+") || "default"})\n` +
-          next.rules.map((r) => `- ${r}`).join("\n"),
-      );
-    }
-    if (next.skills.length > 0) {
-      parts.push(`## Recommended Skills\n${next.skills.map((s) => `- ${s}`).join("\n")}`);
-    }
-    if (parts.length > 0) {
-      return { systemPrompt: [...event.systemPrompt, parts.join("\n\n")] };
+    const block = buildInjectionBlock(next);
+    if (block) {
+      return { systemPrompt: [...event.systemPrompt, block] };
     }
     // Silent when profile unchanged and no rules — zero UI noise.
   });
@@ -393,6 +438,24 @@ export default function (pi: ExtensionAPI) {
   const modelStr = (m?: string | string[]) => (m ? (Array.isArray(m) ? m.join(" → ") : m) : "unset");
 
   /**
+   * Build the injection block that contains rules and skills for system prompt injection.
+   * Returns the formatted string if there are rules/skills to inject, or null if empty.
+   */
+  const buildInjectionBlock = (cfg: MergedConfig): string | null => {
+    const parts: string[] = [];
+    if (cfg.rules.length > 0) {
+      parts.push(
+        `## Active Engineering Rules (${cfg.matched.map((m) => m.name).join("+") || "default"})\n` +
+          cfg.rules.map((r) => `- ${r}`).join("\n"),
+      );
+    }
+    if (cfg.skills.length > 0) {
+      parts.push(`## Recommended Skills\n${cfg.skills.map((s) => `- ${s}`).join("\n")}`);
+    }
+    return parts.length > 0 ? parts.join("\n\n") : null;
+  };
+
+  /**
    * Format the output of explain() into a human-readable trace fragment.
    * (Does not include the header — caller provides that in the header line.)
    */
@@ -422,6 +485,7 @@ export default function (pi: ExtensionAPI) {
 
       if (arg === "clear") {
         manualOverride = null;
+        manualOverrideOnce = false;
         ctx.ui.notify("Profile override cleared — auto-classification resumed", "info");
         return;
       }
@@ -484,6 +548,101 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // ---- /profile stats : session counters ----
+      if (sub === "stats") {
+        const hasActivity =
+          promptsClassified.size > 0 || manualPinsSet > 0 || modelSwitchesAccepted > 0 || modelSwitchesDeclined > 0;
+
+        if (!hasActivity) {
+          ctx.ui.notify("no prompts classified yet", "info");
+          return;
+        }
+
+        const lines: string[] = ["Profile stats (this session):"];
+
+        // Build and sort profiles by count descending
+        const profileStats = Array.from(promptsClassified.entries()).sort((a, b) => b[1] - a[1]);
+        for (const [name, count] of profileStats) {
+          lines.push(`  ${name}: ${count}`);
+        }
+
+        lines.push(`Manual pins set: ${manualPinsSet}`);
+        lines.push(`Model switches accepted: ${modelSwitchesAccepted}`);
+        lines.push(`Model switches declined: ${modelSwitchesDeclined}`);
+
+        ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+
+      // ---- /profile rules : print the exact rules/skills block being injected ----
+      if (sub === "rules") {
+        if (active === null) {
+          ctx.ui.notify("No classification yet — send a prompt first", "info");
+          return;
+        }
+        const block = buildInjectionBlock(active);
+        if (block === null) {
+          ctx.ui.notify(
+            `No rules or skills declared for the active profile (${active.matched.map((m) => m.name).join("+") || "default"})`,
+            "info",
+          );
+          return;
+        }
+        ctx.ui.notify(block, "info");
+        return;
+      }
+
+      // ---- /profile misroute [expected-profile] : log misclassifications to .omp/misroutes.jsonl ----
+      if (sub === "misroute") {
+        if (!lastPrompt) {
+          ctx.ui.notify("nothing to log", "warning");
+          return;
+        }
+        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+        const expectedArg = rest.join(" ").trim() || null;
+
+        // Validate expected-profile argument if provided
+        if (expectedArg && !bundles.profiles.some((p) => p.name === expectedArg)) {
+          ctx.ui.notify(
+            `No profile named "${expectedArg}" in bundles.json. Known: ${bundles.profiles.map((p) => p.name).join(", ") || "(none loaded)"}`,
+            "error",
+          );
+          return;
+        }
+
+        // Create .omp directory if needed and append the JSON line
+        const ompDir = path.join(ctx.cwd, ".omp");
+        fs.mkdirSync(ompDir, { recursive: true });
+        const logPath = path.join(ompDir, "misroutes.jsonl");
+
+        const entry = {
+          ts: new Date().toISOString(),
+          prompt: lastPrompt.slice(0, 500),
+          matched: active?.matched.map((m) => m.name) ?? [],
+          expected: expectedArg,
+        };
+
+        fs.appendFileSync(logPath, JSON.stringify(entry) + "\n");
+        ctx.ui.notify(`Logged misroute to ${logPath}`, "info");
+        return;
+      }
+
+      // ---- /profile <name> --once : turn-scoped pin, auto-clears after one prompt ----
+      const onceMatch = /^(.+?)\s+--once$/.exec(arg);
+      if (onceMatch) {
+        const name = onceMatch[1]!;
+        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+        if (!bundles.profiles.some((p) => p.name === name)) {
+          ctx.ui.notify(`No profile named "${name}" in bundles.json. Known: ${bundles.profiles.map((p) => p.name).join(", ") || "(none loaded)"}`, "error");
+          return;
+        }
+        manualOverride = name;
+        manualOverrideOnce = true;
+        manualPinsSet++;
+        ctx.ui.notify(`Profile pinned to "${name}" for the next prompt only (--once)`, "info");
+        return;
+      }
+
       if (arg) {
         const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
         if (!bundles.profiles.some((p) => p.name === arg)) {
@@ -491,14 +650,17 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         manualOverride = arg;
+        manualOverrideOnce = false;
+        manualPinsSet++;
         ctx.ui.notify(`Profile pinned to "${arg}" until /profile clear`, "info");
         return;
       }
+      const pendingNote = manualOverrideOnce ? `\nPending once-pin: ${manualOverride} (applies to the next prompt only)` : "";
       ctx.ui.notify(
-        active
+        (active
           ? `Active: ${active.matched.map((m) => `${m.name}(${m.score})`).join(", ") || "default"}\n` +
               `Model: ${modelStr(active.model)} | Thinking: ${active.thinkingLevel ?? "unset"} | Disabled agents: ${active.disabledAgents.join(", ") || "none"}`
-          : "No classification yet — send a prompt first",
+          : "No classification yet — send a prompt first") + pendingNote,
         "info",
       );
     },

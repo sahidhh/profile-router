@@ -381,6 +381,18 @@ here. Ordered roughly by the phase in which it arose.
 
 ---
 
+## Phase 12 — Q2 bundles.json JSON Schema
+
+35. **JSON Schema draft-07 for bundles.json with partialProfile definition.** Created `bundles.schema.json` to provide editor autocomplete and validation for `bundles.json`. The schema defines two object types: `profile` (for items in the `profiles[]` array) with `required: ["name", "keywords"]`, and `partialProfile` (for the top-level `default` key) with no required fields. This split is necessary because the real `default` block in bundles.json omits `name` and `keywords` — a `Partial<Profile>` in TypeScript terms. Added `$schema: "./bundles.schema.json"` as the first key in `bundles.json` so JSON-Schema-aware editors (VS Code, etc.) automatically provide validation and autocomplete. Both definitions have `additionalProperties: false` to enforce strict shape; the top-level schema allows the `$schema` property explicitly. The extension's type assertion (`JSON.parse(raw) as Bundles`) and validation (`validateBundles()`) already tolerated unknown keys without modification, so the feature required zero changes to profile-router.ts — verified by running the full test suite.
+
+---
+
+## Phase 13 — Q3 /profile stats
+
+36. **Session counters: what counts, when to count, and sort order.** Added four module-level session counters (`promptsClassified` Map, `manualPinsSet`/`modelSwitchesAccepted`/`modelSwitchesDeclined` integers) incremented at classification, pin, and model-routing decision points. **Classification counting**: multi-match prompts increment the counter for *every* matched profile name, not just the winner, because each matched profile contributes to the merged config (rules union, tool union, etc.). Single-profile matches increment that name; no-match prompts increment "default". **Model-switch counting**: increments fire *every time* a switch decision is applied this turn, including cached decisions from prior turns (retrieved from `modelDecisions` map). This counts every actual switch-or-reject event from the user's perspective, not just first-time decisions. **Sort order**: `promptsClassified` entries sorted by count descending (highest-count profiles first), breaking ties with no stable secondary sort — the order of insertion is deterministic across runs because `classify()` always processes profiles in declaration order. `/profile stats` notifies the exact message `"no prompts classified yet"` when all counters are zero (no activity), preventing confusion between "stats not generated yet" and "stats generated and all zero"; on activity, one multi-line `ctx.ui.notify` displays the stats table in a compact format with profile names and counts, then manual pins and model switch totals.
+
+---
+
 ## Phase 9 — T2 rule-union contradiction fix
 
 31. **Rule-language reworded to describe working-style, not permission/prohibition.** 
@@ -441,3 +453,107 @@ here. Ordered roughly by the phase in which it arose.
     empty (matched profile declares no rules, or default profile with no
     rules), and otherwise returns the identical rules-block formatting
     string already used for `systemPrompt` injection, for consistency.
+
+---
+
+## Phase 11 — Q1 /profile misroute
+
+34. **JSONL append format for misroute logging.** `/profile misroute
+    [expected-profile]` logs classification misses as one JSON object per
+    line to `.omp/misroutes.jsonl`, appending if the file exists (no
+    destructive rewrites). JSONL is streaming-friendly and pairs well with
+    line-by-line analysis scripts. Prompt text is truncated to 500 chars to
+    avoid unbounded file growth on very long prompts. `matched` is derived
+    from the session-scoped `active` state (populated by `before_agent_start`),
+    so stale classification is impossible — misroutes log exactly what the
+    last real prompt matched. The `expected` field is the optional
+    `[expected-profile]` argument (a profile name, or null if omitted) — not
+    the profile that *should have* matched (unknowable without human
+    judgment), but what the user believes the correct routing was. Validation
+    reuses the existing error UX from plain `/profile <name>` pin-rejection
+    (unknown profile names are rejected with the same message listing known
+    profiles). No write occurs if no prompt has been classified (`lastPrompt`
+    is still null) or if validation fails, avoiding noise when the feature
+    is experimented with on fresh sessions or against malformed bundles.
+
+---
+
+## Phase 14 — Q4 /profile rules
+
+37. **Shared `buildInjectionBlock(cfg: MergedConfig) → string | null` helper
+    extracts the rules/skills formatting logic.** The exact injection block that
+    `before_agent_start` appends to the system prompt is now computed by a pure
+    helper function, reusable by both `before_agent_start` (which appends to
+    `systemPrompt` and returns early if block is null) and the new `/profile rules`
+    subcommand (which notifies the block directly). Behavior is byte-identical to
+    before — same string content, same conditions — because the helper contains
+    only the block-building logic, not the systemPrompt-append or return/early-exit
+    semantics (those stay in the caller). `/profile rules` without a classification
+    (`active === null`) notifies the same "No classification yet — send a prompt first"
+    message used elsewhere for consistency, and on a matched profile with zero rules
+    and zero skills, notifies an explicit "No rules or skills declared for the active
+    profile (…)" message rather than silencing — since `/profile rules` is an explicit
+    user request, clarity matters more than zero UI noise. By contrast,
+    `before_agent_start` stays silent when nothing matched and no rules are declared,
+    because it's a per-turn background event; the asymmetry (explicit request →
+    message, background event → silence) is conservative and expected.
+
+---
+
+## Phase 15 — Q5 config-change notice
+
+38. **Config-change detection via content hash, scoped to `before_agent_start` only.**
+    The extension now notifies once per session when `bundles.json` content changes
+    between prompts (first load is always silent). Implementation: a small
+    `configContentHash()` helper duplicates `loadBundles()`'s candidate-path logic
+    and returns a short sha256 hash (first 12 hex chars, human-scannable) of the
+    first-existing file's raw bytes, or null if missing/unreadable. Session state
+    tracks the last hash in `lastConfigHash`; on each `before_agent_start` call, if
+    the current hash differs from the last non-null hash, exactly one `info` notification
+    fires with format `bundles.json changed (<12-hex>) — applied`. The notification
+    is scoped to `before_agent_start` only (read-only inspection subcommands like
+    `/profile list`/`/profile validate`/`/profile explain` do not trigger it), because
+    only `before_agent_start` represents the config actually being *applied* to a turn.
+    Why not modify `loadBundles` itself: returing a hash from `loadBundles` would
+    couple notification logic to config loading, and exportable return-type changes
+    violate the "do not change `loadBundles`'s exported signature or behavior"
+    constraint — a separate helper keeps the concerns orthogonal. Why
+    sha256-first-12-hex: full hashes are unreadable; 12 hex chars (48 bits) are
+    collision-unlikely for session-local identity and remain human-scannable in
+    notifications; longer truncations add no value for a per-session notice.
+    Malformed/missing config leaves `lastConfigHash` untouched (only updates on
+    successful hash reads), so a transient read glitch never erases session-level
+    hash memory.
+
+
+---
+
+## Phase 16 — Q6 turn-scoped --once pin
+
+39. **`--once` overwrites outright; no "previous pin" stack is remembered.**
+    `/profile <name> --once` sets `manualOverride = name` and `manualOverrideOnce = true`,
+    which simply overwrites whatever pin state existed before — a plain sticky pin, a
+    different once-pin, or nothing at all. There is deliberately no memory of a "previous"
+    pin to revert to once the once-pin is consumed: after it's applied to one prompt, both
+    variables clear and the session returns to full auto-classification, never back to
+    whatever plain pin (if any) was active before the once-pin was set. This is the
+    simplest correct semantics per the task's own instruction, and it matches how the
+    rest of this extension treats manual state — a single flat `manualOverride`, not a
+    stack — so introducing revert-to-previous behavior here would be an asymmetric
+    special case for one code path. **The once-flag is consumed (cleared) immediately
+    within the same `before_agent_start` turn that applies it**, not deferred to the start
+    of the next turn: as soon as `manualOverride` is found, matched against a real profile,
+    and used to force `matches`, `manualOverride`/`manualOverrideOnce` are reset to
+    null/false right there, before the rest of the handler (debug trace, status line,
+    model routing) runs. This guarantees the very next `before_agent_start` call sees
+    `manualOverride === null` and classifies normally — the once-pin cannot leak into the
+    next prompt's classification or its debug/trace labeling, because there is nothing
+    left to leak by the time that next call starts. Because the shared state is cleared
+    same-turn, the handler captures `overrideName`/`overrideWasOnce` as local turn-scoped
+    variables the moment the override is detected, and uses those (not the now-possibly-null
+    `manualOverride`/`manualOverrideOnce`) for every later reference in that same turn — the
+    debug-trace line and the status-line `(manual, once)` suffix both read from these locals,
+    never from the module-level variables post-clear. `/profile clear` was extended to reset
+    `manualOverrideOnce` too, so an armed-but-unconsumed once-pin can be cancelled outright,
+    and the bare `/profile` status notification surfaces a `Pending once-pin: <name>` line
+    whenever a once-pin is armed but hasn't yet been applied to a prompt.
