@@ -371,6 +371,22 @@ export default function (pi: ExtensionAPI) {
     // Silent when profile unchanged and no rules — zero UI noise.
   });
 
+  // ---- session.compacting fires mid-run when the agent auto-compacts context. before_agent_start
+  // already re-injects the merged rules block into systemPrompt on every new prompt — this handler
+  // only covers the case where compaction happens *between* prompts, mid-turn, so a long agentic
+  // run doesn't silently lose the active rules when older messages get summarized away.
+  // Event/result shapes verified at dist/types/extensibility/extensions/types.d.ts:652 and
+  // dist/types/extensibility/shared-events.d.ts:66-70,276-284 (see API-FINDINGS.md).
+  pi.on("session.compacting", async (_event, _ctx) => {
+    if (!active || active.rules.length === 0) return;
+    return {
+      context: [
+        `## Active Engineering Rules (${active.matched.map((m) => m.name).join("+") || "default"})\n` +
+          active.rules.map((r) => `- ${r}`).join("\n"),
+      ],
+    };
+  });
+
   // ---- Enforce disabledAgents ----
   pi.on("tool_call", async (event) => {
     if (!active || active.disabledAgents.length === 0) return;

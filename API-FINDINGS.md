@@ -293,3 +293,73 @@ test.
 6. Header install-path comment corrected to `~/.omp/agent/extensions/`
    (project: `.omp/extensions/`), matching the shipped example's own doc
    comment and the discovery source.
+
+---
+
+## (f) `session.compacting` — mid-run compaction rule re-injection (2026-07-13)
+
+**Finding: the event name really does use a dot (`session.compacting`), not
+an underscore**, unlike every other event name used elsewhere in this
+extension (`before_agent_start`, `tool_call`). Confirmed at the registration
+signature itself, `dist/types/extensibility/extensions/types.d.ts:652`:
+
+```ts
+on(event: "session.compacting", handler: ExtensionHandler<SessionCompactingEvent, SessionCompactingResult>): void;
+```
+
+This is a real, distinct string literal type on the `on()` overload set, not
+a typo carried over from a different naming convention — `pi.on("session.compacting", ...)`
+is the only spelling that type-checks against this overload.
+
+**Event payload** (`SessionCompactingEvent`), `dist/types/extensibility/shared-events.d.ts:66-70`
+(source: `src/extensibility/shared-events.ts:77-81`):
+
+```ts
+export interface SessionCompactingEvent {
+  type: "session.compacting";
+  sessionId: string;
+  messages: AgentMessage[];
+}
+```
+
+**Handler return type** (`SessionCompactingResult`), `dist/types/extensibility/shared-events.d.ts:276-284`
+(source: `src/extensibility/shared-events.ts:342-350`):
+
+```ts
+/** Return type for `session.compacting` handlers */
+export interface SessionCompactingResult {
+  /** Additional context lines to include in summary */
+  context?: string[];
+  /** Override the default compaction prompt */
+  prompt?: string;
+  /** Custom data to store in compaction entry */
+  preserveData?: Record<string, unknown>;
+}
+```
+
+**Why `context`, not `prompt` or `preserveData`.** All three fields are
+optional and independent, but they do different jobs:
+
+- `prompt` overrides the *compaction prompt itself* — i.e. the instructions
+  given to whatever process summarizes the conversation. Using it to carry
+  our rules would mean replacing (or having to carefully splice into) the
+  compaction instructions, which is a much larger blast radius than intended
+  and risks breaking the summarizer's own behavior.
+- `preserveData` stores custom data *in the compaction entry* — structured
+  data for the extension's own later retrieval, not something documented as
+  flowing into the summary text the model sees afterward.
+- `context` is documented as "Additional context lines to include in
+  summary" — exactly the shape needed: extra lines injected alongside
+  whatever the compaction step already preserves, so they survive into the
+  post-compaction context. This mirrors the existing `before_agent_start` →
+  `systemPrompt` append pattern (finding (b) above) without touching the
+  compaction mechanism itself.
+
+**Handler signature note.** `ExtensionHandler<E, R>` is
+`(event: E, ctx: ExtensionContext) => Promise<R | void> | R | void`
+(`dist/types/extensibility/extensions/types.d.ts:630`). Unlike the
+`before_agent_start` handler, this handler needs no I/O from `ctx` (no
+`ctx.cwd`, `ctx.ui`, etc.) — it only reads the closure-scoped `active`
+(`MergedConfig | null`) already populated by `before_agent_start` on the
+most recent prompt, so both parameters are prefixed `_event`/`_ctx` and
+unused.

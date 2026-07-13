@@ -406,3 +406,38 @@ here. Ordered roughly by the phase in which it arose.
     Added regression test in `test/profile-router.test.ts` that classifies a co-matching prompt 
     (`implementation` + `lookup`), merges the rules, and asserts no prohibition text (`/read-only/i`, 
     `/do not (edit|write)/i`, `/no (code )?edits?/i`) appears in the merged result.
+
+---
+
+## Phase 10 — T3 mid-run compaction rule re-injection
+
+32. **`session.compacting`'s `context` field chosen over `prompt` or
+    `preserveData`.** `SessionCompactingResult` exposes three independent
+    optional fields (`dist/types/extensibility/shared-events.d.ts:276-284`).
+    `prompt` overrides the compaction step's own instructions — using it to
+    carry the rules block would mean rewriting what the summarizer is told
+    to do, a far larger and riskier surface than just adding content.
+    `preserveData` stores structured data attached to the compaction entry
+    for the extension's own later retrieval, with no documented guarantee it
+    flows back into the text the model sees post-compaction. `context` is
+    documented as "Additional context lines to include in summary" — exactly
+    the additive, non-invasive shape wanted, and it mirrors the existing
+    `before_agent_start` → `systemPrompt` append pattern already used
+    elsewhere in this extension rather than introducing a new mechanism.
+
+33. **Scoped to mid-run compaction only — not a replacement for
+    `before_agent_start`'s rule injection.** `before_agent_start` already
+    re-injects the merged rules block into `systemPrompt` once per new
+    prompt (Phase 0/2 above), so a fresh prompt always carries the current
+    profile's rules regardless of this handler. `session.compacting` fires
+    *between* prompts, mid-turn, when the agent auto-compacts context
+    during a long agentic run — without this handler, if compaction drops
+    the messages that carried the rules injection, the rules would be
+    silently absent from the compacted context until the next prompt
+    re-triggers `before_agent_start`. This handler closes exactly that gap:
+    it reads the same closure-scoped `active: MergedConfig | null` that
+    `before_agent_start` already populates (no new state), is a no-op when
+    `active` is `null` (no prompt classified yet) or `active.rules` is
+    empty (matched profile declares no rules, or default profile with no
+    rules), and otherwise returns the identical rules-block formatting
+    string already used for `systemPrompt` injection, for consistency.

@@ -721,6 +721,63 @@ describe("/profile debug toggle", () => {
   });
 });
 
+describe("session.compacting: mid-run rule re-injection", () => {
+  test("compact with active rules -> rules present in handler result", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "alpha", keywords: ["alpha-kw"], rules: ["alpha-rule-one", "alpha-rule-two"] })],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw please", systemPrompt: [] }, ctx);
+
+      const result = (await handlers["session.compacting"]!(
+        { type: "session.compacting", sessionId: "x", messages: [] },
+        ctx,
+      )) as { context?: string[] } | undefined;
+
+      assert.ok(result?.context, "expected a context array in the result");
+      const joined = result!.context!.join("\n");
+      assert.ok(joined.includes("alpha-rule-one"), "must include first rule");
+      assert.ok(joined.includes("alpha-rule-two"), "must include second rule");
+      assert.ok(joined.includes("alpha"), "must include the matched profile name");
+    });
+  });
+
+  test("compact with active=null -> no-op", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"], rules: ["alpha-rule"] })] });
+      const { handlers, ctx } = await installExtension(dir);
+
+      // No before_agent_start call yet, so `active` is still null.
+      const result = await handlers["session.compacting"]!(
+        { type: "session.compacting", sessionId: "x", messages: [] },
+        ctx,
+      );
+
+      assert.equal(result, undefined);
+    });
+  });
+
+  test("compact with matched profile but zero rules -> no-op", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "norules", keywords: ["norules-kw"], rules: [] })],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+
+      await handlers["before_agent_start"]!({ prompt: "norules-kw please", systemPrompt: [] }, ctx);
+
+      const result = await handlers["session.compacting"]!(
+        { type: "session.compacting", sessionId: "x", messages: [] },
+        ctx,
+      );
+
+      assert.equal(result, undefined);
+    });
+  });
+});
+
 describe("/profile validate", () => {
   test("reports valid for a well-formed bundles.json", async () => {
     await withTempProjectDir(async (dir) => {
