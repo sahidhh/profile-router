@@ -1,4 +1,5 @@
 {
+  "$schema": "./bundles.schema.json",
   "default": {
     "model": [
       "minimax/minimax-m3",

@@ -271,6 +271,34 @@ describe("validateBundles", () => {
   });
 });
 
+// ---------- bundles.schema.json ----------
+
+describe("bundles.schema.json", () => {
+  test("schema file is valid JSON with correct top-level structure", () => {
+    const schemaPath = path.join(import.meta.dirname, "..", "bundles.schema.json");
+    const schemaContent = fs.readFileSync(schemaPath, "utf-8");
+    const schema = JSON.parse(schemaContent);
+
+    assert.equal(schema.type, "object");
+    assert.ok(schema.required);
+    assert.ok(schema.required.includes("profiles"));
+  });
+
+  test("real bundles.json parses and validateBundles returns no problems", () => {
+    const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+    const bundlesContent = fs.readFileSync(bundlesPath, "utf-8");
+    const bundles = JSON.parse(bundlesContent) as Bundles;
+
+    // Verify the file loaded successfully with expected structure
+    assert.ok(Array.isArray(bundles.profiles));
+    assert.ok(bundles.profiles.length > 0);
+
+    // Verify validateBundles finds no problems
+    const problems = validateBundles(bundles);
+    assert.deepEqual(problems, [], `expected no validation problems, got: ${problems.join("; ")}`);
+  });
+});
+
 // ---------- loadBundles() ----------
 
 describe("loadBundles", () => {

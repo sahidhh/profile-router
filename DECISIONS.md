@@ -381,6 +381,12 @@ here. Ordered roughly by the phase in which it arose.
 
 ---
 
+## Phase 12 — Q2 bundles.json JSON Schema
+
+35. **JSON Schema draft-07 for bundles.json with partialProfile definition.** Created `bundles.schema.json` to provide editor autocomplete and validation for `bundles.json`. The schema defines two object types: `profile` (for items in the `profiles[]` array) with `required: ["name", "keywords"]`, and `partialProfile` (for the top-level `default` key) with no required fields. This split is necessary because the real `default` block in bundles.json omits `name` and `keywords` — a `Partial<Profile>` in TypeScript terms. Added `$schema: "./bundles.schema.json"` as the first key in `bundles.json` so JSON-Schema-aware editors (VS Code, etc.) automatically provide validation and autocomplete. Both definitions have `additionalProperties: false` to enforce strict shape; the top-level schema allows the `$schema` property explicitly. The extension's type assertion (`JSON.parse(raw) as Bundles`) and validation (`validateBundles()`) already tolerated unknown keys without modification, so the feature required zero changes to profile-router.ts — verified by running the full test suite.
+
+---
+
 ## Phase 9 — T2 rule-union contradiction fix
 
 31. **Rule-language reworded to describe working-style, not permission/prohibition.** 

@@ -22,6 +22,7 @@ prompt ──► classify (keywords, no LLM) ──► merge matched profiles �
 |---|---|
 | `profile-router.ts` | The whole extension — one file, Node built-ins only |
 | `bundles.json` | The profile table (the part you edit) |
+| `bundles.schema.json` | JSON Schema for `bundles.json` — provides editor validation/autocomplete via the `$schema` key |
 | `MANUAL.md` | Install paths, schema reference, runtime behavior, troubleshooting |
 | `API-FINDINGS.md` | file:line evidence for every OMP API the extension calls |
 | `DECISIONS.md` | Every autonomous judgment call, numbered and justified |
