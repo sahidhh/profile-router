@@ -398,6 +398,27 @@ describe("bundles.json reachability", () => {
     assert.equal(cfg.matched.length, 0);
     assert.equal(cfg.model, realBundles.default?.model);
   });
+
+  test("T2: co-matching implementation and lookup produces no edit-prohibition text in merged rules", () => {
+    // Prompt must match both implementation (write/build keywords) and lookup (find/explain keywords).
+    const prompt = "implement the new feature and write code for it; can you also find where the auth middleware is defined and explain how it works";
+    const classified = classify(prompt, realBundles);
+
+    // Verify co-match actually happened.
+    assert.ok(classified.length >= 2, `expected at least 2 profile matches, got ${classified.length}: ${classified.map((c) => c.profile.name).join(", ")}`);
+    const matched = classified.map((c) => c.profile.name).sort();
+    assert.ok(matched.includes("implementation"), `expected implementation in matches: ${matched.join(", ")}`);
+    assert.ok(matched.includes("lookup"), `expected lookup in matches: ${matched.join(", ")}`);
+
+    // Merge and check that rules union contains no edit-prohibition text.
+    const cfg = merge(classified, realBundles);
+    const rulesJoined = cfg.rules.join("\n");
+
+    // Assert no prohibition language exists in merged rules.
+    assert.ok(!/read-only/i.test(rulesJoined), `merged rules must not contain "read-only": ${rulesJoined}`);
+    assert.ok(!/do not (edit|write)/i.test(rulesJoined), `merged rules must not contain "do not edit/write": ${rulesJoined}`);
+    assert.ok(!/no (code )?edits?/i.test(rulesJoined), `merged rules must not contain "no edits": ${rulesJoined}`);
+  });
 });
 
 // ---------- Extension module load smoke test ----------

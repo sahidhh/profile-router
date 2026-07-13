@@ -24,7 +24,7 @@
         "architectural decision"
       ],
       "rules": [
-        "Decide system shape; do not implement. Read and compare alternatives only.",
+        "Decide system shape by reading and comparing alternatives; implementation is a separate, later step.",
         "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads.",
         "Layer/boundary separation is enforced; violations are checked before merge.",
         "Invariants that must never break belong in the database, not application code.",
@@ -106,7 +106,7 @@
         "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads.",
         "Merge-readiness gate: build clean, tests pass, forbidden-pattern grep clean, no unresolved Critical/High finding.",
         "Max 2 review fix cycles; a third failure halts the loop for human escalation.",
-        "Review does not fix — findings only, no code edits."
+        "Review produces severity-tiered findings; a separate pass implements any accepted fix."
       ],
       "skills": [
         "merge-readiness-checklist",
@@ -145,7 +145,7 @@
         "A fix is not approved until its root cause is identified; symptom patches are rejected.",
         "Search-first, read-restrained: locate via lsp symbols, ast_grep patterns, or grep before opening files.",
         "Reproduce before diagnosing; write the failing case first.",
-        "Read-only: no edits during investigation, only tracing and analysis."
+        "Investigation stays in tracing and analysis mode; fixes happen in a separate pass once the cause is confirmed."
       ],
       "skills": [
         "investigation-doc-generator"
@@ -268,7 +268,7 @@
         "walkthrough"
       ],
       "rules": [
-        "Read-only: do not edit or write files in this profile.",
+        "This profile is retrieval and summarisation; edits happen in a separate implementation pass.",
         "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or opening files.",
         "Read only the spans structural search points to; avoid bulk reads.",
         "Load summaries before full docs; load only direct dependencies.",

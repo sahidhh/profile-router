@@ -378,3 +378,31 @@ here. Ordered roughly by the phase in which it arose.
 | anthropic/claude-opus-4-8 | ✓ | ✗ | ✓ |
 | deepseek/deepseek-v4-flash | ✓ | ✗ | ✓ |
 | google/gemini-2.5-flash-lite | ✓ | ✗ | ✓ |
+
+---
+
+## Phase 9 — T2 rule-union contradiction fix
+
+31. **Rule-language reworded to describe working-style, not permission/prohibition.** 
+    Four profiles (`architecture`, `review`, `investigation`, `lookup`) had enforcement-style language 
+    ("read-only", "do not edit/write", "no edits") in their `rules` arrays — statements that 
+    re-expressed capability restrictions already encoded in the `tools` array. When two profiles 
+    co-match (e.g. `implementation` + `lookup`), the merged `rules` union would produce a contradictory 
+    system prompt: "do not edit" rules from `lookup` union with "write/edit/bash" tools from `implementation`, 
+    even though `merge()`'s tool union correctly restricts capability (the `tools` array is the sole source 
+    of enforcement). 
+    
+    **Option A chosen per scope constraint**: reword the 4 rules to describe *working style* (what the 
+    profile focuses on/does), not permission statements, leaving `tools` arrays unchanged:
+    - `architecture` "Decide system shape; do not implement. Read and compare alternatives only." 
+      → "Decide system shape by reading and comparing alternatives; implementation is a separate, later step."
+    - `review` "Review does not fix — findings only, no code edits." 
+      → "Review produces severity-tiered findings; a separate pass implements any accepted fix."
+    - `investigation` "Read-only: no edits during investigation, only tracing and analysis." 
+      → "Investigation stays in tracing and analysis mode; fixes happen in a separate pass once the cause is confirmed."
+    - `lookup` "Read-only: do not edit or write files in this profile." 
+      → "This profile is retrieval and summarisation; edits happen in a separate implementation pass."
+    
+    Added regression test in `test/profile-router.test.ts` that classifies a co-matching prompt 
+    (`implementation` + `lookup`), merges the rules, and asserts no prohibition text (`/read-only/i`, 
+    `/do not (edit|write)/i`, `/no (code )?edits?/i`) appears in the merged result.
