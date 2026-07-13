@@ -341,3 +341,40 @@ here. Ordered roughly by the phase in which it arose.
     prefix.
     Documented as the answer to "is JSON the only way to edit profiles?" in
     both `README.md` and `MANUAL.md`.
+
+---
+
+## Phase 8 — T1 provider/model verification (stabilization session)
+
+30. **All native-provider model strings verified live and catalog-resolved.** Systematic
+    re-verification of the 6 unique model strings across bundles.json (minimax/minimax-m3,
+    anthropic/claude-sonnet-5, deepseek/deepseek-v4-pro, anthropic/claude-opus-4-8,
+    deepseek/deepseek-v4-flash, google/gemini-2.5-flash-lite) confirms:
+    - **Catalog**: All 6 resolve via case-insensitive matching in pi-catalog
+      `models.json` under their respective first-party providers (verified via
+      `getProviderModelIndex` logic in `model-resolver.ts:382-397`).
+    - **Credentialed**: Only `OPENROUTER_API_KEY` is available in this environment;
+      all 6 models require their native provider credentials (ANTHROPIC_API_KEY,
+      DEEPSEEK_API_KEY, MINIMAX_API_KEY, GOOGLE_API_KEY) for direct calls, which are
+      NOT present.
+    - **Live via OpenRouter**: All 6 models confirmed working via OpenRouter API
+      (`openrouter.ai/api/v1/chat/completions`) with minimal test requests; OpenRouter
+      proxies all of them under their standard `provider/id` format (e.g.
+      `minimax/minimax-m3`, `anthropic/claude-sonnet-5`). Trade-off aligns with
+      decision #29: native provider strings resolve through the catalog, users with
+      only OpenRouter credentials still access via OpenRouter's proxy layer at runtime.
+    - **No bundled changes required**: Current bundles.json model strings are correct
+      and unmodified; decision #29's removal of `openrouter/*` prefixes was the right
+      move.
+    - **Scope cut (out of v1)**: Google AI Studio (free tier, billed per-user not
+      per-request) and NVIDIA NIM (enterprise-only, requires on-prem deployment) are
+      explicitly out of scope — their tiers are not added to bundles.json.
+
+| Model | Catalog | Credentialed | Live (OpenRouter) |
+|-------|---------|--------------|-------------------|
+| minimax/minimax-m3 | ✓ (as MiniMax-M3) | ✗ | ✓ |
+| anthropic/claude-sonnet-5 | ✓ | ✗ | ✓ |
+| deepseek/deepseek-v4-pro | ✓ | ✗ | ✓ |
+| anthropic/claude-opus-4-8 | ✓ | ✗ | ✓ |
+| deepseek/deepseek-v4-flash | ✓ | ✗ | ✓ |
+| google/gemini-2.5-flash-lite | ✓ | ✗ | ✓ |
