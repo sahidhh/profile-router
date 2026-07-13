@@ -797,3 +797,57 @@ describe("/profile validate", () => {
     });
   });
 });
+
+describe("/profile explain", () => {
+  test("emits a trace notification for the given prompt without mutating state", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "winner", keywords: ["test-kw"] }),
+          profile({ name: "other", keywords: ["other-kw"] }),
+        ],
+      });
+      const { commands, handlers, notifications, statuses, setModelCalls, ctx } = await installExtension(dir);
+
+      // Call explain subcommand with a multi-word prompt containing the keyword
+      notifications.length = 0;
+      await commands["profile"]!.handler("explain this is a test-kw prompt", ctx);
+
+      // Should emit exactly one notification with the trace
+      assert.equal(notifications.length, 1);
+      const trace = notifications[0]!;
+      assert.equal(trace.level, "info");
+      assert.ok(trace.msg.includes("Profile routing"), "header should mention routing");
+      assert.ok(trace.msg.includes("winner"), "should name the winning profile");
+      assert.ok(trace.msg.includes("test-kw"), "should show the matched keyword");
+      assert.ok(trace.msg.includes("← chosen"), "should mark the winner");
+
+      // Verify state was not mutated by the explain call
+      assert.equal(setModelCalls.length, 0, "should not have called setModel");
+
+      // Now send a real prompt to classify and set the status
+      notifications.length = 0;
+      await handlers["before_agent_start"]!({ prompt: "other-kw here", systemPrompt: [] }, ctx);
+
+      // Status should reflect the real classification, not influenced by the explain call
+      assert.equal(statuses["profile"], "⚙ other", "status should reflect actual classification, not explain");
+    });
+  });
+
+  test("shows a usage message when no text provided", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "test", keywords: ["test-kw"] })] });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("explain", ctx);
+
+      // Should emit a usage message
+      assert.equal(notifications.length, 1);
+      const msg = notifications[0]!;
+      assert.equal(msg.level, "warning");
+      assert.ok(msg.msg.includes("Usage"), "should show usage");
+      assert.ok(msg.msg.includes("/profile explain"), "should mention the command");
+    });
+  });
+});

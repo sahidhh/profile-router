@@ -274,17 +274,7 @@ export default function (pi: ExtensionAPI) {
         lines.push(`  → ${manualOverride} (manual pin — classification bypassed)`);
       } else {
         const rows = explain(event.prompt, bundles);
-        const scored = rows.filter((r) => r.score > 0);
-        if (scored.length === 0) {
-          lines.push("  → default (no keywords matched)");
-        } else {
-          scored.forEach((r, i) => {
-            const mark = i === 0 ? "→" : " ";
-            lines.push(`  ${mark} ${r.name}: ${r.score}  [${r.matched.join(", ")}]${i === 0 ? "  ← chosen" : ""}`);
-          });
-        }
-        const zero = rows.length - scored.length;
-        if (zero > 0) lines.push(`  (${zero} other profile${zero === 1 ? "" : "s"} scored 0)`);
+        lines.push(...formatTraceLines(rows));
       }
       ctx.ui.notify(lines.join("\n"), "info");
     }
@@ -402,10 +392,30 @@ export default function (pi: ExtensionAPI) {
 
   const modelStr = (m?: string | string[]) => (m ? (Array.isArray(m) ? m.join(" → ") : m) : "unset");
 
+  /**
+   * Format the output of explain() into a human-readable trace fragment.
+   * (Does not include the header — caller provides that in the header line.)
+   */
+  const formatTraceLines = (rows: ReturnType<typeof explain>): string[] => {
+    const lines: string[] = [];
+    const scored = rows.filter((r) => r.score > 0);
+    if (scored.length === 0) {
+      lines.push("  → default (no keywords matched)");
+    } else {
+      scored.forEach((r, i) => {
+        const mark = i === 0 ? "→" : " ";
+        lines.push(`  ${mark} ${r.name}: ${r.score}  [${r.matched.join(", ")}]${i === 0 ? "  ← chosen" : ""}`);
+      });
+    }
+    const zero = rows.length - scored.length;
+    if (zero > 0) lines.push(`  (${zero} other profile${zero === 1 ? "" : "s"} scored 0)`);
+    return lines;
+  };
+
   // ---- Manual override + status ----
   pi.registerCommand("profile", {
     description:
-      "Status/override: /profile [<name>|clear] | list | debug [on|off] | validate",
+      "Status/override: /profile [<name>|clear] | list | debug [on|off] | validate | explain <text>",
     handler: async (args, ctx) => {
       const arg = (args ?? "").trim();
       const [sub, ...rest] = arg.split(/\s+/);
@@ -456,6 +466,21 @@ export default function (pi: ExtensionAPI) {
         } else {
           ctx.ui.notify(`✗ bundles.json has ${problems.length} problem${problems.length === 1 ? "" : "s"}:\n${problems.map((p) => `  - ${p}`).join("\n")}`, "warning");
         }
+        return;
+      }
+
+      // ---- /profile explain <text> : show routing trace for a prompt without sending it ----
+      if (sub === "explain") {
+        const text = arg.slice(sub.length).trim();
+        if (!text) {
+          ctx.ui.notify("Usage: /profile explain <prompt text>", "warning");
+          return;
+        }
+        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+        const rows = explain(text, bundles);
+        const headerText = `🔎 Profile routing for "${text.slice(0, 60)}${text.length > 60 ? "…" : ""}"`;
+        const lines = [headerText, ...formatTraceLines(rows)];
+        ctx.ui.notify(lines.join("\n"), "info");
         return;
       }
 

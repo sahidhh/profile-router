@@ -74,6 +74,8 @@ context.
   - `/profile debug on` (`off` to stop) — prints a per-prompt routing trace
     showing which keywords each profile matched, the scores, and the winner,
     so you can see *why* a profile was chosen. Off by default.
+  - `/profile explain <text>` — stateless routing trace for a given prompt text,
+    showing how it would classify without sending it or changing any session state.
   - `/profile validate` — structural check of `bundles.json` (duplicate names,
     empty keywords, bad `thinkingLevel`/`model`) without sending a prompt.
 - **Phrase prompts with trigger vocabulary.** "summarize how auth works"
