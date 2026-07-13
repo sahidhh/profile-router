@@ -1048,6 +1048,87 @@ describe("/profile stats", () => {
   });
 });
 
+describe("/profile rules", () => {
+  test("after classifying a profile with rules and skills, /profile rules notifies the exact injection block string", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({
+            name: "test-profile",
+            keywords: ["test-kw"],
+            rules: ["test-rule-one", "test-rule-two"],
+            skills: ["test-skill"],
+          }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      // Classify a prompt with the profile
+      const beforeAgentStartResult = (await handlers["before_agent_start"]!({ prompt: "test-kw here", systemPrompt: [] }, ctx)) as
+        | { systemPrompt?: string[] }
+        | undefined;
+      assert.ok(beforeAgentStartResult?.systemPrompt, "before_agent_start should return a systemPrompt array");
+      const injectedBlock = beforeAgentStartResult.systemPrompt![beforeAgentStartResult.systemPrompt!.length - 1];
+
+      // Now call /profile rules and verify the exact string matches
+      notifications.length = 0;
+      await commands["profile"]!.handler("rules", ctx);
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0]!.level, "info");
+      assert.equal(
+        notifications[0]!.msg,
+        injectedBlock,
+        "the /profile rules output must exactly match what before_agent_start injected",
+      );
+    });
+  });
+
+  test("active === null (no classification yet) -> notifies 'No classification yet — send a prompt first'", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "test", keywords: ["test-kw"] })] });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("rules", ctx);
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0]!.level, "info");
+      assert.equal(notifications[0]!.msg, "No classification yet — send a prompt first");
+    });
+  });
+
+  test("profile with empty rules and empty skills -> notifies explicit 'no rules or skills declared' message", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({
+            name: "norules",
+            keywords: ["norules-kw"],
+            rules: [],
+            skills: [],
+          }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      // Classify a prompt first
+      await handlers["before_agent_start"]!({ prompt: "norules-kw here", systemPrompt: [] }, ctx);
+
+      // Now call /profile rules
+      notifications.length = 0;
+      await commands["profile"]!.handler("rules", ctx);
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0]!.level, "info");
+      assert.ok(
+        notifications[0]!.msg.includes("No rules or skills declared for the active profile (norules)"),
+        `expected explicit message, got: ${notifications[0]!.msg}`,
+      );
+    });
+  });
+});
+
 // ---------- T5: larger, realistic regression fixture (paraphrases, near-misses, multi-match) ----------
 
 describe("routing-expectations fixture: semantic-overlap regression", () => {

@@ -475,3 +475,25 @@ here. Ordered roughly by the phase in which it arose.
     profiles). No write occurs if no prompt has been classified (`lastPrompt`
     is still null) or if validation fails, avoiding noise when the feature
     is experimented with on fresh sessions or against malformed bundles.
+
+---
+
+## Phase 14 — Q4 /profile rules
+
+37. **Shared `buildInjectionBlock(cfg: MergedConfig) → string | null` helper
+    extracts the rules/skills formatting logic.** The exact injection block that
+    `before_agent_start` appends to the system prompt is now computed by a pure
+    helper function, reusable by both `before_agent_start` (which appends to
+    `systemPrompt` and returns early if block is null) and the new `/profile rules`
+    subcommand (which notifies the block directly). Behavior is byte-identical to
+    before — same string content, same conditions — because the helper contains
+    only the block-building logic, not the systemPrompt-append or return/early-exit
+    semantics (those stay in the caller). `/profile rules` without a classification
+    (`active === null`) notifies the same "No classification yet — send a prompt first"
+    message used elsewhere for consistency, and on a matched profile with zero rules
+    and zero skills, notifies an explicit "No rules or skills declared for the active
+    profile (…)" message rather than silencing — since `/profile rules` is an explicit
+    user request, clarity matters more than zero UI noise. By contrast,
+    `before_agent_start` stays silent when nothing matched and no rules are declared,
+    because it's a per-turn background event; the asymmetry (explicit request →
+    message, background event → silence) is conservative and expected.

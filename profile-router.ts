@@ -358,18 +358,9 @@ export default function (pi: ExtensionAPI) {
     }
 
     // ---- Rules injection into system prompt for this agent run ----
-    const parts: string[] = [];
-    if (next.rules.length > 0) {
-      parts.push(
-        `## Active Engineering Rules (${next.matched.map((m) => m.name).join("+") || "default"})\n` +
-          next.rules.map((r) => `- ${r}`).join("\n"),
-      );
-    }
-    if (next.skills.length > 0) {
-      parts.push(`## Recommended Skills\n${next.skills.map((s) => `- ${s}`).join("\n")}`);
-    }
-    if (parts.length > 0) {
-      return { systemPrompt: [...event.systemPrompt, parts.join("\n\n")] };
+    const block = buildInjectionBlock(next);
+    if (block) {
+      return { systemPrompt: [...event.systemPrompt, block] };
     }
     // Silent when profile unchanged and no rules — zero UI noise.
   });
@@ -404,6 +395,24 @@ export default function (pi: ExtensionAPI) {
   });
 
   const modelStr = (m?: string | string[]) => (m ? (Array.isArray(m) ? m.join(" → ") : m) : "unset");
+
+  /**
+   * Build the injection block that contains rules and skills for system prompt injection.
+   * Returns the formatted string if there are rules/skills to inject, or null if empty.
+   */
+  const buildInjectionBlock = (cfg: MergedConfig): string | null => {
+    const parts: string[] = [];
+    if (cfg.rules.length > 0) {
+      parts.push(
+        `## Active Engineering Rules (${cfg.matched.map((m) => m.name).join("+") || "default"})\n` +
+          cfg.rules.map((r) => `- ${r}`).join("\n"),
+      );
+    }
+    if (cfg.skills.length > 0) {
+      parts.push(`## Recommended Skills\n${cfg.skills.map((s) => `- ${s}`).join("\n")}`);
+    }
+    return parts.length > 0 ? parts.join("\n\n") : null;
+  };
 
   /**
    * Format the output of explain() into a human-readable trace fragment.
@@ -520,6 +529,24 @@ export default function (pi: ExtensionAPI) {
         lines.push(`Model switches declined: ${modelSwitchesDeclined}`);
 
         ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+
+      // ---- /profile rules : print the exact rules/skills block being injected ----
+      if (sub === "rules") {
+        if (active === null) {
+          ctx.ui.notify("No classification yet — send a prompt first", "info");
+          return;
+        }
+        const block = buildInjectionBlock(active);
+        if (block === null) {
+          ctx.ui.notify(
+            `No rules or skills declared for the active profile (${active.matched.map((m) => m.name).join("+") || "default"})`,
+            "info",
+          );
+          return;
+        }
+        ctx.ui.notify(block, "info");
         return;
       }
 

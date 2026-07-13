@@ -250,6 +250,10 @@ On **every** prompt submission (`before_agent_start`):
   duplicate profile names, missing/empty `keywords`, unknown `thinkingLevel`,
   and malformed `model`. Reports `✓ valid` or an itemized list of problems —
   no prompt needed.
+- `/profile rules` — prints the exact rules/skills block currently being injected
+  into the system prompt for the active profile. Reuses the same injection logic
+  as `before_agent_start`, so what you see is exactly what gets injected into
+  each prompt.
 - `/profile misroute [expected-profile]` — logs the last classified prompt
   (truncated to 500 chars), the profiles it matched, and (optionally) the
   profile you expected it to match, as a single JSON line appended to
