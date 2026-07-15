@@ -130,6 +130,11 @@
           "type": "array",
           "items": { "$ref": "#/definitions/ruleEntry" }
         },
+        "commonRules": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ruleEntry" },
+          "description": "Rules shared by every profile (e.g. the truncation-handling rule); merged as default -> commonRules -> profile.rules, deduped by text."
+        },
         "skills": {
           "type": "array",
           "items": { "type": "string" }

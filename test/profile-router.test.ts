@@ -264,6 +264,88 @@ describe("merge", () => {
     const cfg = merge(matches, fixtureBundles);
     assert.deepEqual(cfg.rules.sort(), ["alpha-rule", "beta-rule", "gamma-rule"].sort());
   });
+
+  // ---- T2: symmetric suppression (readonly-scope tag) ----
+
+  test("symmetric suppression: co-matched profiles each suppress the other's tagged rule, regardless of order", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({
+          name: "readonly",
+          keywords: ["readonly-kw"],
+          suppresses: ["write-scope"],
+          rules: ["untagged-shared", { tag: "readonly-scope", text: "edits happen in a separate pass" }],
+        }),
+        profile({
+          name: "writer",
+          keywords: ["writer-kw"],
+          suppresses: ["readonly-scope"],
+          rules: ["untagged-shared", { tag: "write-scope", text: "make the edit now" }],
+        }),
+      ],
+    };
+    const forward = merge(
+      [{ profile: bundles.profiles[0]!, score: 1 }, { profile: bundles.profiles[1]!, score: 1 }],
+      bundles,
+    );
+    const reverse = merge(
+      [{ profile: bundles.profiles[1]!, score: 1 }, { profile: bundles.profiles[0]!, score: 1 }],
+      bundles,
+    );
+    for (const cfg of [forward, reverse]) {
+      assert.deepEqual(
+        cfg.rules,
+        ["untagged-shared"],
+        `both tagged rules must be mutually suppressed on co-match, order-independent: ${cfg.rules.join(", ")}`,
+      );
+    }
+  });
+
+  test("symmetric suppression: a profile matched alone still carries its own tagged rule (suppression only fires on co-match)", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({
+          name: "readonly",
+          keywords: ["readonly-kw"],
+          suppresses: ["write-scope"],
+          rules: [{ tag: "readonly-scope", text: "edits happen in a separate pass" }],
+        }),
+      ],
+    };
+    const cfg = merge(classify("readonly-kw", bundles), bundles);
+    assert.deepEqual(cfg.rules, ["edits happen in a separate pass"]);
+  });
+
+  // ---- T3: shared commonRules ----
+
+  test("commonRules: merged in for a single-profile match alongside its own rules, present exactly once", () => {
+    const bundles: Bundles = {
+      default: { commonRules: ["shared-truncation-rule"] },
+      profiles: [profile({ name: "solo", keywords: ["solo-kw"], rules: ["solo-only-rule"] })],
+    };
+    const cfg = merge(classify("solo-kw", bundles), bundles);
+    assert.deepEqual(cfg.rules.sort(), ["shared-truncation-rule", "solo-only-rule"].sort());
+    assert.equal(cfg.rules.filter((r) => r === "shared-truncation-rule").length, 1);
+  });
+
+  test("commonRules: deduped when a profile also happens to declare the same text verbatim", () => {
+    const bundles: Bundles = {
+      default: { commonRules: ["shared-truncation-rule"] },
+      profiles: [profile({ name: "solo", keywords: ["solo-kw"], rules: ["shared-truncation-rule", "solo-only-rule"] })],
+    };
+    const cfg = merge(classify("solo-kw", bundles), bundles);
+    assert.equal(cfg.rules.filter((r) => r === "shared-truncation-rule").length, 1);
+    assert.deepEqual(cfg.rules.sort(), ["shared-truncation-rule", "solo-only-rule"].sort());
+  });
+
+  test("commonRules: also merged into the no-match default fallback path, alongside default.rules", () => {
+    const bundles: Bundles = {
+      default: { rules: ["default-only-rule"], commonRules: ["shared-truncation-rule"] },
+      profiles: [profile({ name: "unrelated", keywords: ["unrelated-kw"] })],
+    };
+    const cfg = merge([], bundles);
+    assert.deepEqual(cfg.rules.sort(), ["default-only-rule", "shared-truncation-rule"].sort());
+  });
 });
 
 // ---------- explain() ----------
@@ -582,6 +664,82 @@ describe("bundles.json reachability", () => {
       for (const text of taggedRuleTexts(implementationProfile, [tag])) {
         assert.ok(!coMatched.rules.includes(text), `co-matched rules must not contain implementation's "${tag}" rule: "${text}"`);
       }
+    }
+  });
+
+  // ---- T2: symmetric suppression against the real bundles.json ----
+
+  test("T2: readonly-scope tag is symmetric — lookup's scope-statement rule is suppressed when co-matched with a write profile", () => {
+    const lookupProfile = realBundles.profiles.find((p) => p.name === "lookup")!;
+    const implementationProfile = realBundles.profiles.find((p) => p.name === "implementation")!;
+    assert.ok(implementationProfile.suppresses?.includes("readonly-scope"), "implementation must suppress readonly-scope");
+
+    const readonlyScopeTexts = taggedRuleTexts(lookupProfile, ["readonly-scope"]);
+    assert.ok(readonlyScopeTexts.length > 0, "lookup must declare a readonly-scope-tagged rule");
+
+    // Alone, lookup's scope statement is present (matches the "lookup alone" golden behavior).
+    const alone = merge([{ profile: lookupProfile, score: 5 }], realBundles);
+    for (const text of readonlyScopeTexts) assert.ok(alone.rules.includes(text));
+
+    // Co-matched with a write profile, the scope statement must be suppressed — it would
+    // otherwise contradict the write profile's live edit mandate.
+    const coMatched = merge(
+      [{ profile: lookupProfile, score: 5 }, { profile: implementationProfile, score: 5 }],
+      realBundles,
+    );
+    for (const text of readonlyScopeTexts) {
+      assert.ok(!coMatched.rules.includes(text), `co-matched rules must not contain lookup's readonly-scope rule: "${text}"`);
+    }
+    // The conditional escape-hatch rule (untagged) is a different concern and must still survive.
+    assert.ok(coMatched.rules.includes(ESCAPE_HATCH));
+  });
+
+  test("T2: every capabilities.write===true profile declares suppresses including readonly-scope, symmetric with every write:false profile's readonly-scope rule", () => {
+    const writeTrueProfiles = realBundles.profiles.filter((p) => p.capabilities?.write === true);
+    assert.ok(writeTrueProfiles.length > 0);
+    for (const wp of writeTrueProfiles) {
+      assert.ok(wp.suppresses?.includes("readonly-scope"), `write profile "${wp.name}" must suppress "readonly-scope"`);
+    }
+
+    const readonlyScopeProfiles = realBundles.profiles.filter((p) =>
+      (p.rules ?? []).some((r) => typeof r !== "string" && r.tag === "readonly-scope"),
+    );
+    assert.ok(readonlyScopeProfiles.length > 0, "at least one profile must declare a readonly-scope rule");
+
+    for (const rp of readonlyScopeProfiles) {
+      const texts = taggedRuleTexts(rp, ["readonly-scope"]);
+      for (const wp of writeTrueProfiles) {
+        const cfg = merge([{ profile: rp, score: 5 }, { profile: wp, score: 5 }], realBundles);
+        for (const text of texts) {
+          assert.ok(
+            !cfg.rules.includes(text),
+            `"${rp.name}" co-matched with write profile "${wp.name}" must not carry readonly-scope rule: "${text}"`,
+          );
+        }
+      }
+    }
+  });
+
+  // ---- T3: shared commonRules against the real bundles.json ----
+
+  test("T3: the truncation rule lives in default.commonRules, not duplicated in any profile's own rules", () => {
+    const TRUNCATION_RULE =
+      "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names.";
+    assert.ok(realBundles.default?.commonRules?.includes(TRUNCATION_RULE), "default.commonRules must include the truncation rule verbatim");
+
+    for (const p of realBundles.profiles) {
+      const ownTexts = (p.rules ?? []).map((r) => (typeof r === "string" ? r : r.text));
+      assert.ok(!ownTexts.includes(TRUNCATION_RULE), `profile "${p.name}" must not duplicate the truncation rule in its own rules`);
+    }
+  });
+
+  test("T3: every profile's resolved rule set carries the truncation rule exactly once", () => {
+    const TRUNCATION_RULE =
+      "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names.";
+    for (const p of realBundles.profiles) {
+      const cfg = merge([{ profile: p, score: 5 }], realBundles);
+      const count = cfg.rules.filter((r) => r === TRUNCATION_RULE).length;
+      assert.equal(count, 1, `profile "${p.name}" resolved rules must carry the truncation rule exactly once, got ${count}: ${cfg.rules.join(", ")}`);
     }
   });
 });

@@ -48,7 +48,12 @@ export interface Profile {
 
 export interface Bundles {
   profiles: Profile[];         // declaration order = tiebreak order
-  default?: Partial<Profile>;
+  default?: Partial<Profile> & {
+    // Rules shared by every profile (e.g. the truncation-handling rule), so the
+    // wording is declared once instead of copy-pasted into each profile's `rules`.
+    // Merge order is default.rules -> commonRules -> profile.rules (dedup by text).
+    commonRules?: RuleEntry[];
+  };
 }
 
 export interface MergedConfig {
@@ -283,7 +288,9 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
   if (matches.length === 0) {
     // Fallback to default profile when nothing matched.
     if (bundles.default) {
-      cfg.rules = resolveRules([bundles.default.rules], new Set());
+      // Merge order: default.rules -> default.commonRules (dedup by text; commonRules
+      // holds wording shared across every profile, e.g. the truncation-handling rule).
+      cfg.rules = resolveRules([bundles.default.rules, bundles.default.commonRules], new Set());
       union(cfg.skills, bundles.default.skills);
       union(cfg.tools, bundles.default.tools);
       cfg.disabledAgents = bundles.default.disabledAgents ?? [];
@@ -296,9 +303,11 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
   // Rule suppression (Branch A): union all matched profiles' rules by text, union all
   // matched profiles' `suppresses` tags, then drop any tagged rule whose tag is killed.
   // Destructive and order-independent — a suppressing co-match always wins over union.
+  // Merge order: default.commonRules first (shared wording, deduped against any profile
+  // that still declares the same text), then each matched profile's own rules.
   const kill = new Set<string>();
   for (const { profile } of matches) for (const tag of profile.suppresses ?? []) kill.add(tag);
-  cfg.rules = resolveRules(matches.map((m) => m.profile.rules), kill);
+  cfg.rules = resolveRules([bundles.default?.commonRules, ...matches.map((m) => m.profile.rules)], kill);
 
   // disabledAgents: intersection — any matched profile that leaves an agent
   // enabled keeps it enabled overall.
