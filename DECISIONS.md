@@ -423,6 +423,14 @@ here. Ordered roughly by the phase in which it arose.
 
 ## Phase 10 — T3 mid-run compaction rule re-injection
 
+> **SUPERSEDED / FALSIFIED (2026-07-15).** Decision #33's premise — that mid-run
+> compaction can drop the messages carrying the rules injection — is wrong. The
+> merged rules ride in `systemPrompt`, a field separate from the message array,
+> re-sent on every model call and never compacted (`"system"` is not a message
+> role). The `session.compacting` handler is therefore redundant. Kept in the
+> codebase for now (harmless no-op-when-`active`-null), but **struck from the
+> open-work list — do not re-prioritize.**
+
 32. **`session.compacting`'s `context` field chosen over `prompt` or
     `preserveData`.** `SessionCompactingResult` exposes three independent
     optional fields (`dist/types/extensibility/shared-events.d.ts:276-284`).
