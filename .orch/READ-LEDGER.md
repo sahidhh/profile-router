@@ -33,3 +33,7 @@ bundles.json | edited | normalized premium.model from string "anthropic/claude-o
 bundles.schema.json | edited | simplified model field from oneOf[string, array] to array-only in both profile and partialProfile definitions
 profile-router.ts | edited | Profile/MergedConfig interfaces: model?: string[] (removed union); validateBundles: array-only validation; model resolution loop: iterate next.model directly (removed conditional); modelStr() helper simplified
 test/profile-router.test.ts | edited | 8 fixture strings→arrays; 5 assertions: assert.equal→assert.deepEqual with array values; 123/123 pass, tsc clean
+--- T5 CONFIDENCE MARGIN (this pass) ---
+profile-router.ts | 1-810 (T5 pass, reused prior full-read digest) | formatTraceLines() at 606-624 is the shared formatter for /profile debug trace (465-476) and /profile explain (681-694); explain() at 234-245 scores ALL profiles sorted desc, powers the trace
+profile-router.ts | edited | formatTraceLines(): added Δ margin line = scored[0].score - (scored[1]?.score ?? 0), with "(vs runner-up NAME)" or "(no runner-up — full score)" annotation
+test/profile-router.test.ts | edited, +2 tests | new describe("/profile debug trace: confidence margin"): (a) winner+runner-up margin=1, (b) sole winner -> margin=winner's full score; 125/125 pass, tsc clean

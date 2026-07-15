@@ -1248,6 +1248,52 @@ describe("/profile debug toggle", () => {
   });
 });
 
+describe("/profile debug trace: confidence margin", () => {
+  test("clear winner with a runner-up shows margin = winner score - runner-up score", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          // winner scores 2 (two keyword hits), runner-up scores 1 (one keyword hit)
+          profile({ name: "winner", keywords: ["win-kw", "extra-kw"] }),
+          profile({ name: "runner", keywords: ["run-kw"] }),
+        ],
+      });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("explain win-kw extra-kw run-kw prompt", ctx);
+
+      assert.equal(notifications.length, 1);
+      const trace = notifications[0]!.msg;
+      assert.ok(trace.includes("winner: 2"), "winner should score 2");
+      assert.ok(trace.includes("runner: 1"), "runner-up should score 1");
+      assert.ok(trace.includes("Δ margin: 1"), "margin should be winner(2) - runner-up(1) = 1");
+      assert.ok(trace.includes('vs runner-up "runner"'), "should name the runner-up profile");
+    });
+  });
+
+  test("only one profile matching (no runner-up) shows margin as the winner's full score", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "lonewinner", keywords: ["lone-kw"] }),
+          profile({ name: "unrelated", keywords: ["nomatch-kw"] }),
+        ],
+      });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("explain lone-kw prompt", ctx);
+
+      assert.equal(notifications.length, 1);
+      const trace = notifications[0]!.msg;
+      assert.ok(trace.includes("lonewinner: 1"), "lone winner should score 1");
+      assert.ok(trace.includes("Δ margin: 1"), "margin should equal the winner's full score");
+      assert.ok(trace.includes("no runner-up"), "should indicate there was no runner-up");
+    });
+  });
+});
+
 describe("session.compacting: mid-run rule re-injection", () => {
   test("compact with active rules -> rules present in handler result", async () => {
     await withTempProjectDir(async (dir) => {

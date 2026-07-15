@@ -613,6 +613,17 @@ export default function (pi: ExtensionAPI) {
         const mark = i === 0 ? "→" : " ";
         lines.push(`  ${mark} ${r.name}: ${r.score}  [${r.matched.join(", ")}]${i === 0 ? "  ← chosen" : ""}`);
       });
+      // Confidence margin: winner's score minus the runner-up's — the second-highest-scoring
+      // candidate profile, even if it never cleared minScore / matched. When no runner-up
+      // exists (every other profile scored 0), the margin equals the winner's full score.
+      const winner = scored[0]!;
+      const runnerUp = scored[1];
+      const margin = winner.score - (runnerUp ? runnerUp.score : 0);
+      lines.push(
+        runnerUp
+          ? `  Δ margin: ${margin} (vs runner-up "${runnerUp.name}")`
+          : `  Δ margin: ${margin} (no runner-up — full score)`,
+      );
     }
     const zero = rows.length - scored.length;
     if (zero > 0) lines.push(`  (${zero} other profile${zero === 1 ? "" : "s"} scored 0)`);
