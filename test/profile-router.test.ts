@@ -1699,6 +1699,11 @@ describe("T01-03: two-axis scoring routing", () => {
     assert.equal(hits[0]?.profile.name, "implementation");
   });
 
+  test('"urgent fix for the schema migration" -> premium (hotfix disqualified by excludeKeywords "schema"/"migration")', () => {
+    const hits = classify("urgent fix for the schema migration", realBundles);
+    assert.equal(hits[0]?.profile.name, "premium");
+  });
+
   test("stickiness: short/continuation follow-ups inherit the previous turn's profile", () => {
     const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
     assert.equal(first[0]?.profile.name, "investigation");

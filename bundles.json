@@ -252,6 +252,13 @@
         "urgent fix",
         "patch now"
       ],
+      "excludeKeywords": [
+        "schema",
+        "secret",
+        "migration",
+        "invariant",
+        "credential"
+      ],
       "capabilities": { "read": true, "write": true, "execute": true },
       "suppresses": ["readonly-scope"],
       "rules": [

@@ -23,3 +23,8 @@ bundles.json | edited | tagged 4 "separate pass" rules with {tag:"readonly-scope
 profile-router.ts | edited | Bundles.default type += commonRules?: RuleEntry[]; merge() resolveRules calls updated to merge order default.rules→commonRules (fallback) and commonRules→profile.rules (matched)
 bundles.schema.json | edited | added commonRules property to partialProfile definition
 test/profile-router.test.ts | edited, +9 tests | symmetric suppression (fixture + real bundles), commonRules dedup/order (fixture + real bundles); 122/122 pass, tsc clean
+--- T2b HOTFIX-EXCLUDEKEYWORDS FIX APPLIED (this pass) ---
+bundles.json | edited | added excludeKeywords: ["schema", "secret", "migration", "invariant", "credential"] to hotfix profile (line 254-259); field already defined in schema and enforced by profile-router.ts scoreProfile() since T01-03
+profile-router.ts | verified, no change | excludeKeywords already enforced at line 141-143 in scoreProfile() function; ANY hit disqualifies profile with score=-Infinity
+bundles.schema.json | verified, no change | excludeKeywords already defined as array of strings (line 47-51), description "Any hit disqualifies this profile (score = -Infinity)"
+test/profile-router.test.ts | edited, +1 test | added '"urgent fix for the schema migration" -> premium (hotfix disqualified by excludeKeywords "schema"/"migration")' test; 123/123 pass, tsc clean
