@@ -565,3 +565,21 @@ here. Ordered roughly by the phase in which it arose.
     `manualOverrideOnce` too, so an armed-but-unconsumed once-pin can be cancelled outright,
     and the bare `/profile` status notification surfaces a `Pending once-pin: <name>` line
     whenever a once-pin is armed but hasn't yet been applied to a prompt.
+
+---
+
+## Deferred follow-ups (not scheduled — gates for a future session)
+
+D-F1. **Profile-driven `<skills>` filtering (verify before building).** The
+    extensions-API `before_agent_start` receives `systemPrompt: string[]`, and a
+    type-level trace (grep of `.d.ts` only) indicates the rendered `<skills>`
+    block is an *element* of that array rather than concatenated downstream —
+    i.e. a hook could filter it per active profile. This is an **inference**
+    (the shipped implementation is `.js`; the literal token "skills" does not
+    appear in `extensibility/*.d.ts`). **Gate:** if this work is ever scheduled,
+    FIRST do a one-time read of the shipped `.js` `buildSystemPrompt` and CONFIRM
+    the `<skills>` block is genuinely an element of the `systemPrompt[]` the hook
+    receives — not appended after the hook returns — THEN spec the design against
+    that observed fact, not the inference. If never scheduled, the inference
+    stays as-is: harmless, no cost. (Currently a no-op here anyway — `lookup`
+    ships `skills: []`; see BLOCKERS / T06b.)
