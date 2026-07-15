@@ -85,10 +85,8 @@
           "items": { "type": "string" }
         },
         "model": {
-          "oneOf": [
-            { "type": "string" },
-            { "type": "array", "items": { "type": "string" } }
-          ]
+          "type": "array",
+          "items": { "type": "string" }
         },
         "thinkingLevel": {
           "type": "string",
@@ -148,10 +146,8 @@
           "items": { "type": "string" }
         },
         "model": {
-          "oneOf": [
-            { "type": "string" },
-            { "type": "array", "items": { "type": "string" } }
-          ]
+          "type": "array",
+          "items": { "type": "string" }
         },
         "thinkingLevel": {
           "type": "string",

@@ -28,3 +28,8 @@ bundles.json | edited | added excludeKeywords: ["schema", "secret", "migration",
 profile-router.ts | verified, no change | excludeKeywords already enforced at line 141-143 in scoreProfile() function; ANY hit disqualifies profile with score=-Infinity
 bundles.schema.json | verified, no change | excludeKeywords already defined as array of strings (line 47-51), description "Any hit disqualifies this profile (score = -Infinity)"
 test/profile-router.test.ts | edited, +1 test | added '"urgent fix for the schema migration" -> premium (hotfix disqualified by excludeKeywords "schema"/"migration")' test; 123/123 pass, tsc clean
+--- T3b MODEL-SHAPE NORMALIZATION (this pass) ---
+bundles.json | edited | normalized premium.model from string "anthropic/claude-opus-4-8" to array ["anthropic/claude-opus-4-8"]; 6 other profiles unchanged (already arrays)
+bundles.schema.json | edited | simplified model field from oneOf[string, array] to array-only in both profile and partialProfile definitions
+profile-router.ts | edited | Profile/MergedConfig interfaces: model?: string[] (removed union); validateBundles: array-only validation; model resolution loop: iterate next.model directly (removed conditional); modelStr() helper simplified
+test/profile-router.test.ts | edited | 8 fixture strings→arrays; 5 assertions: assert.equal→assert.deepEqual with array values; 123/123 pass, tsc clean

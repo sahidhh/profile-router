@@ -42,7 +42,7 @@ export interface Profile {
   skills?: string[];           // union
   tools?: string[];            // union
   disabledAgents?: string[];   // INTERSECTION across matched profiles
-  model?: string | string[];   // single-value: highest score wins; array = fallback chain, first resolvable wins
+  model?: string[];            // fallback chain: first resolvable wins
   thinkingLevel?: string;      // single-value: highest score wins
 }
 
@@ -62,7 +62,7 @@ export interface MergedConfig {
   skills: string[];
   tools: string[];
   disabledAgents: string[];
-  model?: string | string[];
+  model?: string[];
   thinkingLevel?: string;
 }
 
@@ -356,11 +356,8 @@ export function validateBundles(bundles: Bundles): string[] {
     if (p.thinkingLevel !== undefined && !VALID_THINKING_LEVELS.includes(p.thinkingLevel)) {
       problems.push(`${label}: thinkingLevel "${p.thinkingLevel}" is not one of ${VALID_THINKING_LEVELS.join("/")}`);
     }
-    if (
-      p.model !== undefined &&
-      !(typeof p.model === "string" || (Array.isArray(p.model) && p.model.every((m) => typeof m === "string")))
-    ) {
-      problems.push(`${label}: "model" must be a string or an array of strings`);
+    if (p.model !== undefined && !(Array.isArray(p.model) && p.model.every((m) => typeof m === "string"))) {
+      problems.push(`${label}: "model" must be an array of strings`);
     }
     if (p.rules !== undefined) {
       if (!Array.isArray(p.rules)) {
@@ -490,10 +487,9 @@ export default function (pi: ExtensionAPI) {
     // `model` may be a fallback chain (["openrouter/...", "anthropic/..."]) —
     // the first spec that resolves against a credentialed provider wins.
     if (next.model) {
-      const candidates = Array.isArray(next.model) ? next.model : [next.model];
       let resolved: ReturnType<typeof ctx.models.resolve>;
       let resolvedSpec: string | undefined;
-      for (const spec of candidates) {
+      for (const spec of next.model) {
         resolved = ctx.models.resolve(spec);
         if (resolved) {
           resolvedSpec = spec;
@@ -524,11 +520,11 @@ export default function (pi: ExtensionAPI) {
           }
         }
       } else {
-        const warnKey = candidates.join(", ");
+        const warnKey = next.model.join(", ");
         if (!unresolvedModelWarned.has(warnKey)) {
           unresolvedModelWarned.add(warnKey);
           const profileNames = next.matched.map((m) => m.name).join("+") || "default";
-          ctx.ui.notify(`Profile "${profileNames}" references model${candidates.length > 1 ? "s" : ""} "${warnKey}" — none could be resolved, continuing with the current model`, "warning");
+          ctx.ui.notify(`Profile "${profileNames}" references model${next.model.length > 1 ? "s" : ""} "${warnKey}" — none could be resolved, continuing with the current model`, "warning");
         }
         debugLog("model not resolvable", { model: warnKey });
       }
@@ -583,7 +579,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  const modelStr = (m?: string | string[]) => (m ? (Array.isArray(m) ? m.join(" → ") : m) : "unset");
+  const modelStr = (m?: string[]) => (m ? m.join(" → ") : "unset");
 
   /**
    * Build the injection block that contains rules and skills for system prompt injection.
