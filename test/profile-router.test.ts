@@ -1762,6 +1762,42 @@ describe("T01-03: two-axis scoring routing", () => {
     assert.equal(third[0]?.profile.name, "investigation");
     assert.equal(third[0]?.inherited, true, "should be marked inherited, not freshly classified");
   });
+
+  test('stickiness: "continue" triggers sticky continuation', () => {
+    const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("continue", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
+
+  test('stickiness: "now fix it" triggers sticky continuation', () => {
+    const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("now fix it", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
+
+  test('stickiness: "go on" triggers sticky continuation', () => {
+    const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("go on", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
+
+  test('stickiness: "next" triggers sticky continuation', () => {
+    const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("next", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
 });
 
 // ---------- T09: golden regression fixtures locking in exact prod failures ----------

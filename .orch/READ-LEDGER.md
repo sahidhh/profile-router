@@ -43,3 +43,8 @@ test/profile-router.test.ts | edited | 8 fixture strings→arrays; 5 assertions:
 profile-router.ts | 1-810 (T5 pass, reused prior full-read digest) | formatTraceLines() at 606-624 is the shared formatter for /profile debug trace (465-476) and /profile explain (681-694); explain() at 234-245 scores ALL profiles sorted desc, powers the trace
 profile-router.ts | edited | formatTraceLines(): added Δ margin line = scored[0].score - (scored[1]?.score ?? 0), with "(vs runner-up NAME)" or "(no runner-up — full score)" annotation
 test/profile-router.test.ts | edited, +2 tests | new describe("/profile debug trace: confidence margin"): (a) winner+runner-up margin=1, (b) sole winner -> margin=winner's full score; 125/125 pass, tsc clean
+--- T7 STICKY-CONTINUATION PHRASES (this pass) ---
+profile-router.ts | 178-228 | isStickyContinuation() at 196-201 is a simple Set<string>.has() exact-match check (tokenCount<6 OR CONTINUATION_PHRASES.has(trimmed)); CONTINUATION_PHRASES Set at 182-195; text pre-lowercased by classify() caller
+profile-router.ts | edited | added "now fix it" to CONTINUATION_PHRASES (only new phrase of the 4 requested; "continue"/"go on"/"next" already present, skipped as duplicates)
+test/profile-router.test.ts | 1743-1765 (read) + edited, +4 tests | found existing stickiness test pattern (classify first prompt -> investigation, then classify phrase as turn2 with prevProfileName, assert inherited); added 4 tests, one per requested phrase ("continue","now fix it","go on","next"); 133/133 pass, tsc clean
+.orch/summaries/09-sticky-continuation-phrases.md | created | T7 summary: function location, list shape, 1 new/3 duplicate phrases, diff, tests added, npm run check PASS 133/133

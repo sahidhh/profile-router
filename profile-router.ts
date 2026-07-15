@@ -191,6 +191,7 @@ const CONTINUATION_PHRASES = new Set([
   "do it",
   "proceed",
   "thanks",
+  "now fix it",
 ]);
 
 function isStickyContinuation(text: string): boolean {
