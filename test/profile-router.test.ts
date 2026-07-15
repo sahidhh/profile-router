@@ -1554,3 +1554,70 @@ describe("T01-03: two-axis scoring routing", () => {
     assert.equal(third[0]?.inherited, true, "should be marked inherited, not freshly classified");
   });
 });
+
+// ---------- T09: golden regression fixtures locking in exact prod failures ----------
+
+describe("golden: prod-failure regression lock", () => {
+  const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+  const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+
+  test('golden #1: "explain this repo - optimal scan use micro sub-agents or tools" -> investigation', () => {
+    const hits = classify("explain this repo - optimal scan use micro sub-agents or tools", realBundles);
+    assert.equal(hits[0]?.profile.name, "investigation");
+  });
+
+  test('golden #2: "ok, go on" as turn 2 after golden #1 -> investigation, inherited via stickiness', () => {
+    const first = classify("explain this repo - optimal scan use micro sub-agents or tools", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("ok, go on", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
+
+  test('golden #3: "explore and explain this repository" -> investigation', () => {
+    const hits = classify("explore and explain this repository", realBundles);
+    assert.equal(hits[0]?.profile.name, "investigation");
+  });
+
+  test("golden #4: lookup's RESOLVED rule set (alone) carries zero implement/verify/cleanup-tagged rules", () => {
+    const lookupProfile = realBundles.profiles.find((p) => p.name === "lookup")!;
+    assert.ok(lookupProfile, "fixture must declare a lookup profile");
+
+    const resolved = merge([{ profile: lookupProfile, score: 5 }], realBundles);
+    const mandateLike = resolved.rules.filter((r) =>
+      /\b(implement|write code|verify|run (tests|npm)|clean ?up|complete(ness)?[- ]contract)\b/i.test(r),
+    );
+    assert.deepEqual(
+      mandateLike,
+      [],
+      `lookup's resolved rules must mandate no write/verify/cleanup action: ${JSON.stringify(resolved.rules)}`,
+    );
+  });
+
+  test("golden #5: semantic-overlap lookup+implementation co-match -> no contradictory write mandates survive; escape-hatch present, read-only wins", () => {
+    const lookupProfile = realBundles.profiles.find((p) => p.name === "lookup")!;
+    const implementationProfile = realBundles.profiles.find((p) => p.name === "implementation")!;
+
+    const resolved = merge(
+      [{ profile: lookupProfile, score: 5 }, { profile: implementationProfile, score: 5 }],
+      realBundles,
+    );
+    const rulesJoined = resolved.rules.join("\n");
+
+    // Escape hatch (untagged, never suppressed) must survive.
+    assert.ok(
+      /exceeds read-only scope, state that and stop/i.test(rulesJoined),
+      `co-matched resolved rules must retain lookup's escape-hatch rule: ${rulesJoined}`,
+    );
+
+    // Implementation's tagged write/verify/cleanup mandates must not survive lookup's suppresses.
+    const bannedTags = ["implement", "verify", "cleanup"];
+    const bannedTexts = (implementationProfile.rules ?? [])
+      .filter((r): r is { tag: string; text: string } => typeof r !== "string" && bannedTags.includes(r.tag))
+      .map((r) => r.text);
+    for (const text of bannedTexts) {
+      assert.ok(!resolved.rules.includes(text), `co-matched resolved rules must not contain suppressed rule: "${text}"`);
+    }
+  });
+});
