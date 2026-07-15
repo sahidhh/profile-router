@@ -595,10 +595,23 @@ export default function (pi: ExtensionAPI) {
     // Silent when profile unchanged and no rules — zero UI noise.
   });
 
-  // ---- session.compacting fires mid-run when the agent auto-compacts context. before_agent_start
-  // already re-injects the merged rules block into systemPrompt on every new prompt — this handler
-  // only covers the case where compaction happens *between* prompts, mid-turn, so a long agentic
-  // run doesn't silently lose the active rules when older messages get summarized away.
+  // ---- session.compacting fires mid-run when the agent auto-compacts context.
+  // Believed-redundant: systemPrompt is not compacted, so the active rules cannot be lost to
+  // compaction and this handler is not needed to preserve them. Verified in the installed runtime:
+  //   - node_modules/@oh-my-pi/pi-agent-core/src/agent-loop.ts:834-837 — "Refresh prompt/tool
+  //     context from live state before each model call" → calls syncContextBeforeModelCall.
+  //   - node_modules/@oh-my-pi/pi-agent-core/src/agent.ts:1150-1156 — that sync reassigns
+  //     context.systemPrompt = this.#state.systemPrompt, i.e. it is re-read from live agent state
+  //     and resent on every model call.
+  //   - node_modules/@oh-my-pi/pi-agent-core/src/compaction/compaction.ts:1094-1106
+  //     (CompactionPreparation) and :145-155 (CompactionResult) carry messages only — systemPrompt
+  //     is neither an input nor an output of compaction; the summarizer call itself swaps in
+  //     SUMMARIZATION_SYSTEM_PROMPT (:855).
+  // Retained as harmless. Note it is not literally a no-op: the returned `context` is appended to
+  // the *summarization prompt* (shared-events.ts:344-345 "Additional context lines to include in
+  // summary" → compaction.ts:826), so it can only bias the generated summary toward rule-relevant
+  // detail. That is a nice-to-have, not the rule-preservation mechanism it was written to be.
+  // See .orch/DECISIONS.md T1.
   // Event/result shapes verified at dist/types/extensibility/extensions/types.d.ts:652 and
   // dist/types/extensibility/shared-events.d.ts:66-70,276-284 (see API-FINDINGS.md).
   pi.on("session.compacting", async (_event, _ctx) => {
