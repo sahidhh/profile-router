@@ -7,7 +7,9 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --experimental-strip-types --test test/*.test.ts",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "install:global": "node --experimental-strip-types scripts/install-global.ts",
+    "install:global:check": "node --experimental-strip-types scripts/install-global.ts --check"
   },
   "repository": {
     "type": "git",

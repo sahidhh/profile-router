@@ -28,7 +28,22 @@ precedence order (CLI-injected > project settings > user settings; see
 `~/.omp/extensions/` — the `agent/` segment is required (verified against
 the installed package's discovery source; see `API-FINDINGS.md` §(a)).
 
-Steps:
+For **global, default-profile** scope, `npm run install:global` does steps 1–2
+for you: it copies `profile-router.ts`, `bundles.json`, and
+`bundles.schema.json` from the repo to the `~/.omp` paths above, creating
+directories as needed, and reports a short content hash per file so you can see
+what actually changed. It is idempotent — unchanged files are skipped.
+`npm run install:global:check` reports drift without writing and exits non-zero
+if the global install is stale, so it also works as a pre-commit or CI guard.
+
+The install is a **copy, not a symlink**, deliberately: symlinks require
+administrator rights on Windows unless Developer Mode is enabled, and hardlinks
+detach silently when git rewrites a file during `checkout`/`pull` — which would
+freeze the global install at stale content with no visible signal. Re-run
+`npm run install:global` after editing; that is the tradeoff for needing no
+elevation.
+
+Steps (manual equivalent, and the only path for project/named-profile scope):
 
 1. Copy `profile-router.ts` to one of the extension paths above.
 2. Copy `bundles.json` to the matching config path above (project scope
@@ -42,6 +57,39 @@ Steps:
 5. Send any prompt and check the status line (bottom of the TUI) for
    `⚙ <profile-name>` — that confirms the extension loaded and is
    classifying.
+
+### 1a. Keeping the global install in sync
+
+Because the global install is a copy, the repo and `~/.omp` drift apart the
+moment you edit either one. To resync, from the repo root:
+
+```sh
+npm run install:global
+```
+
+Safe to run at any time: it prints `→` for each file it updated, `=` for each
+one already current, and does nothing at all if everything matches.
+
+Re-run it after:
+
+- **Editing `profile-router.ts`** — then restart the OMP session (or `/reload`).
+  The extension file is only read at session start.
+- **Editing `bundles.json`** — no restart needed. It is re-read from disk on
+  every prompt, so the next prompt picks it up.
+- **`git pull` or switching branches** — these rewrite the files underneath you.
+
+To see whether the global install is stale without changing anything:
+
+```sh
+npm run install:global:check
+```
+
+It exits non-zero on drift, which is what makes it usable as a pre-commit hook
+or CI step if you would rather have staleness caught than remembered.
+
+**The sync is one-directional: repo → global, never the reverse.** The repo is
+the source of truth. Do not edit `~/.omp/bundles.json` in place — the next sync
+overwrites it silently, with no merge and no prompt.
 
 ---
 
