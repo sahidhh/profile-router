@@ -1830,3 +1830,101 @@ describe("golden: prod-failure regression lock", () => {
     }
   });
 });
+
+describe("telemetry: routing decisions logged to .profile-router-telemetry.log", () => {
+  test("appends exactly one line per route decision", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["alpha-kw"] }),
+          profile({ name: "beta", keywords: ["beta-kw"] }),
+        ],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      // First routing decision
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw test", systemPrompt: [] }, ctx);
+      const lines1 = fs.readFileSync(logPath, "utf-8").trim().split("\n");
+      assert.equal(lines1.length, 1, "should have exactly one line after first route");
+
+      // Second routing decision
+      await handlers["before_agent_start"]!({ prompt: "beta-kw test", systemPrompt: [] }, ctx);
+      const lines2 = fs.readFileSync(logPath, "utf-8").trim().split("\n");
+      assert.equal(lines2.length, 2, "should have exactly two lines after second route (append-only)");
+    });
+  });
+
+  test("logs correct fields: timestamp, truncated prompt, chosen profile, margin, runner-up", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["alpha-kw"] }),
+          profile({ name: "beta", keywords: ["beta-kw"] }),
+        ],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      // Route to alpha (it has 1 keyword match, beta has 0)
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw test", systemPrompt: [] }, ctx);
+
+      const logContent = fs.readFileSync(logPath, "utf-8").trim();
+      const logEntry = JSON.parse(logContent);
+
+      // Verify all required fields exist
+      assert.ok(logEntry.timestamp, "should have timestamp");
+      assert.ok(typeof logEntry.timestamp === "string", "timestamp should be string");
+      assert.ok(logEntry.prompt, "should have prompt");
+      assert.equal(logEntry.chosenProfile, "alpha", "should log chosen profile");
+      assert.equal(typeof logEntry.margin, "number", "should have numeric margin");
+      assert.equal(logEntry.runnerUpProfile, "beta", "should log runner-up profile name");
+    });
+  });
+
+  test("truncates long prompts to ~200 chars", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      // Create a long prompt (> 200 chars)
+      const longPrompt = "alpha-kw " + "a".repeat(300);
+      await handlers["before_agent_start"]!({ prompt: longPrompt, systemPrompt: [] }, ctx);
+
+      const logContent = fs.readFileSync(logPath, "utf-8").trim();
+      const logEntry = JSON.parse(logContent);
+
+      // Verify prompt is truncated to ~200 chars + "…"
+      assert.ok(logEntry.prompt.length <= 202, "prompt should be truncated to ~200 chars + ellipsis");
+      assert.ok(logEntry.prompt.endsWith("…"), "truncated prompt should end with ellipsis");
+    });
+  });
+
+  test("computes margin as winner score minus runner-up score", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "strong", keywords: ["test-kw", "other-kw"] }), // 2 hits
+          profile({ name: "weak", keywords: ["test-kw"] }), // 1 hit
+          profile({ name: "none", keywords: ["unrelated-kw"] }), // 0 hits
+        ],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      // Route to strong (score 2) vs weak (score 1) vs none (score 0)
+      await handlers["before_agent_start"]!({ prompt: "test-kw other-kw content", systemPrompt: [] }, ctx);
+
+      const logContent = fs.readFileSync(logPath, "utf-8").trim();
+      const logEntry = JSON.parse(logContent);
+
+      // Margin should be winner (2) - runner-up (1) = 1
+      assert.equal(logEntry.margin, 1, "margin should be 2 - 1 = 1");
+      assert.equal(logEntry.chosenProfile, "strong", "should choose strong");
+      assert.equal(logEntry.runnerUpProfile, "weak", "runner-up should be weak");
+    });
+  });
+});

@@ -407,6 +407,44 @@ export default function (pi: ExtensionAPI) {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
   };
 
+  /**
+   * Log a telemetry entry for this routing decision to .profile-router-telemetry.log.
+   * Appends one line per route (never truncates).
+   * Format: JSON-lines with timestamp, truncated prompt, chosen profile, margin, runner-up name.
+   */
+  const logTelemetry = (
+    cwd: string,
+    prompt: string,
+    chosenProfileName: string,
+    explain_rows: ReturnType<typeof explain>,
+  ) => {
+    try {
+      // Find the chosen profile's score and runner-up in the full explain ranking
+      const chosenRow = explain_rows.find((r) => r.name === chosenProfileName);
+      const chosenScore = chosenRow?.score ?? 0;
+      const runnerUpRow = explain_rows[1]; // second-highest, already sorted by explain()
+      const runnerUpScore = runnerUpRow?.score ?? 0;
+      const margin = chosenScore - runnerUpScore;
+      const runnerUpName = runnerUpRow?.name ?? null;
+
+      // Truncate prompt to safe length (200 chars)
+      const truncatedPrompt = prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt;
+
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        prompt: truncatedPrompt,
+        chosenProfile: chosenProfileName,
+        margin,
+        runnerUpProfile: runnerUpName,
+      };
+
+      const logPath = path.join(cwd, ".profile-router-telemetry.log");
+      fs.appendFileSync(logPath, JSON.stringify(logEntry) + "\n", "utf-8");
+    } catch (err) {
+      debugLog("telemetry write failed", { error: (err as Error).message });
+    }
+  };
+
   // ---- Every prompt: classify, merge, inject ----
   pi.on("before_agent_start", async (event, ctx) => {
     const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
@@ -460,6 +498,12 @@ export default function (pi: ExtensionAPI) {
     for (const n of namesToCount) promptsClassified.set(n, (promptsClassified.get(n) ?? 0) + 1);
 
     debugLog("classified", { prompt: event.prompt.slice(0, 80), matched: next.matched });
+
+    // ---- Telemetry: log every routing decision ----
+    if (next.matched.length > 0) {
+      const explain_rows = explain(event.prompt, bundles);
+      logTelemetry(ctx.cwd, event.prompt, next.matched[0]!.name, explain_rows);
+    }
 
     // ---- Debug trace: explain WHY this prompt routed where it did (toggled via /profile debug) ----
     if (debugTrace) {
