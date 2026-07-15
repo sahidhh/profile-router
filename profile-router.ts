@@ -26,7 +26,11 @@ import * as crypto from "node:crypto";
 export interface Profile {
   name: string;
   description?: string;         // one-line human summary (display only; never affects classification)
-  keywords: string[];          // classifier terms
+  keywords: string[];          // legacy classifier terms; weight 1 (always scored, in addition to verbs/scopes)
+  verbs?: string[];             // weak/rhetorical action words (e.g. "explain", "find"); weight 1
+  scopes?: string[];            // code-element / breadth nouns (e.g. "function", "repository"); weight 2
+  excludeKeywords?: string[];   // ANY hit disqualifies the profile (score = -Infinity)
+  minScore?: number;            // qualifying threshold for this profile; default 1 (preserves legacy score>0 routing)
   rules?: string[];            // injected into system prompt
   skills?: string[];           // union
   tools?: string[];            // union
@@ -105,42 +109,109 @@ function configContentHash(cwd: string): string | null {
  * Records WHICH keywords claimed a span (not just the count) so the same logic
  * powers both classify() (score only) and explain() (score + matched keywords).
  */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function wordBoundaryTest(text: string, term: string): boolean {
+  return new RegExp(`\\b${escapeRegExp(term.toLowerCase())}\\b`).test(text);
+}
+
+/**
+ * Two-axis scoring: keywords (legacy, weight 1) and verbs (weight 1) are weak
+ * signals; scopes (weight 2) are strong breadth/topic signals. All three
+ * categories are always scored together — a profile that adds verbs/scopes
+ * does not lose its existing `keywords` contribution. Any excludeKeywords hit
+ * disqualifies the profile outright (score = -Infinity), independent of the
+ * claimed-span logic below.
+ */
 export function scoreProfile(text: string, profile: Profile): { score: number; matched: string[] } {
+  for (const kw of profile.excludeKeywords ?? []) {
+    if (wordBoundaryTest(text, kw)) return { score: -Infinity, matched: [] };
+  }
+
   // Claimed text spans, so a longer phrase (e.g. "code review") and a shorter
-  // keyword it contains (e.g. "review") can't both score off the same words.
+  // keyword it contains (e.g. "review") can't both score off the same words —
+  // now shared across keywords/verbs/scopes so e.g. "auth flow" (scope) beats
+  // a bare "flow" (also a scope) at the same span.
   const claimed: [number, number][] = [];
   const overlapsClaimed = (start: number, end: number) => claimed.some(([s, e]) => start < e && s < end);
   const matched: string[] = [];
+  let score = 0;
 
-  const byLengthDesc = [...profile.keywords].sort((a, b) => b.length - a.length);
-  for (const kw of byLengthDesc) {
+  const terms: { term: string; weight: number }[] = [
+    ...profile.keywords.map((term) => ({ term, weight: 1 })),
+    ...(profile.verbs ?? []).map((term) => ({ term, weight: 1 })),
+    ...(profile.scopes ?? []).map((term) => ({ term, weight: 2 })),
+  ];
+  const byLengthDesc = terms.sort((a, b) => b.term.length - a.term.length);
+  for (const { term, weight } of byLengthDesc) {
     // Word-boundary match beats naive substring ("fix" shouldn't hit "prefix").
-    const re = new RegExp(`\\b${kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g");
+    const re = new RegExp(`\\b${escapeRegExp(term.toLowerCase())}\\b`, "g");
     let m: RegExpExecArray | null;
     while ((m = re.exec(text))) {
       const start = m.index;
       const end = start + m[0].length;
       if (!overlapsClaimed(start, end)) {
         claimed.push([start, end]);
-        matched.push(kw);
+        matched.push(term);
+        score += weight;
         break;
       }
     }
   }
-  return { score: matched.length, matched };
+  return { score, matched };
 }
 
-export function classify(prompt: string, bundles: Bundles): { profile: Profile; score: number }[] {
+// Stickiness: a turn with no qualifying match inherits the previous turn's
+// profile when the new prompt is short (<6 tokens) or is a bare continuation
+// ("ok", "continue", ...) — i.e. it's plausibly still talking about the same
+// thing rather than starting a new topic.
+const CONTINUATION_PHRASES = new Set([
+  "ok",
+  "yes",
+  "go on",
+  "continue",
+  "next",
+  "and",
+  "more",
+  "keep going",
+  "do it",
+  "proceed",
+  "thanks",
+]);
+
+function isStickyContinuation(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return false;
+  const tokenCount = trimmed.split(/\s+/).length;
+  return tokenCount < 6 || CONTINUATION_PHRASES.has(trimmed);
+}
+
+export function classify(
+  prompt: string,
+  bundles: Bundles,
+  prevProfileName?: string | null,
+): { profile: Profile; score: number; inherited?: boolean }[] {
   const text = prompt.toLowerCase();
   const hits: { profile: Profile; score: number; order: number }[] = [];
 
   bundles.profiles.forEach((profile, order) => {
     const { score } = scoreProfile(text, profile);
-    if (score > 0) hits.push({ profile, score, order });
+    const minScore = profile.minScore ?? 1;
+    if (score >= minScore) hits.push({ profile, score, order });
   });
 
   // Sort: score desc, then declaration order asc (tiebreak rule)
   hits.sort((a, b) => b.score - a.score || a.order - b.order);
+
+  if (hits.length === 0 && prevProfileName) {
+    const prevProfile = bundles.profiles.find((p) => p.name === prevProfileName);
+    if (prevProfile && isStickyContinuation(text)) {
+      return [{ profile: prevProfile, score: 0, inherited: true }];
+    }
+  }
+
   return hits.map(({ profile, score }) => ({ profile, score }));
 }
 
@@ -263,6 +334,7 @@ export default function (pi: ExtensionAPI) {
   let modelSwitchesAccepted = 0;
   let modelSwitchesDeclined = 0;
   let lastConfigHash: string | null = null;       // content hash from the most recent bundles.json load this session
+  let stickyPrevProfile: string | null = null;    // last active profile name, for stickiness inheritance; reset on explicit /profile pin/clear or new session
 
   const debugLog = (msg: string, context?: Record<string, unknown>) => {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
@@ -281,7 +353,7 @@ export default function (pi: ExtensionAPI) {
       lastConfigHash = currentHash;
     }
 
-    let matches = classify(event.prompt, bundles);
+    let matches = classify(event.prompt, bundles, stickyPrevProfile);
     let overrideApplied = false;
     let overrideWasOnce = false;
     let overrideName: string | null = null;
@@ -312,6 +384,10 @@ export default function (pi: ExtensionAPI) {
     const next = merge(matches, bundles);
     active = next;
 
+    // Stickiness memory: remember the resulting active profile (whether freshly
+    // matched, inherited, or manually pinned) so the next turn can inherit it.
+    if (next.matched.length > 0) stickyPrevProfile = next.matched[0]!.name;
+
     // Increment promptsClassified counter for each matched profile, or "default" if none matched
     const namesToCount = next.matched.length ? next.matched.map((m) => m.name) : ["default"];
     for (const n of namesToCount) promptsClassified.set(n, (promptsClassified.get(n) ?? 0) + 1);
@@ -323,6 +399,8 @@ export default function (pi: ExtensionAPI) {
       const lines: string[] = [`🔎 Profile routing for "${event.prompt.slice(0, 60)}${event.prompt.length > 60 ? "…" : ""}"`];
       if (overrideApplied) {
         lines.push(`  → ${overrideName} (manual pin${overrideWasOnce ? ", once" : ""} — classification bypassed)`);
+      } else if (matches[0]?.inherited) {
+        lines.push(`  → ${matches[0].profile.name} (inherited from prev turn)`);
       } else {
         const rows = explain(event.prompt, bundles);
         lines.push(...formatTraceLines(rows));
@@ -486,6 +564,7 @@ export default function (pi: ExtensionAPI) {
       if (arg === "clear") {
         manualOverride = null;
         manualOverrideOnce = false;
+        stickyPrevProfile = null;
         ctx.ui.notify("Profile override cleared — auto-classification resumed", "info");
         return;
       }
@@ -638,6 +717,7 @@ export default function (pi: ExtensionAPI) {
         }
         manualOverride = name;
         manualOverrideOnce = true;
+        stickyPrevProfile = null;
         manualPinsSet++;
         ctx.ui.notify(`Profile pinned to "${name}" for the next prompt only (--once)`, "info");
         return;
@@ -651,6 +731,7 @@ export default function (pi: ExtensionAPI) {
         }
         manualOverride = arg;
         manualOverrideOnce = false;
+        stickyPrevProfile = null;
         manualPinsSet++;
         ctx.ui.notify(`Profile pinned to "${arg}" until /profile clear`, "info");
         return;

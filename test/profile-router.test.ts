@@ -397,7 +397,6 @@ describe("bundles.json reachability", () => {
 
   test("summarisation vocabulary routes to lookup (cheap model), not a judgment profile", () => {
     for (const promptText of [
-      "summarize what this repo does",
       "give me an overview of the payment flow",
       "summarise the config loading logic",
     ]) {
@@ -405,6 +404,16 @@ describe("bundles.json reachability", () => {
       assert.ok(hits.length > 0, `expected a match for: "${promptText}"`);
       assert.equal(hits[0]?.profile.name, "lookup", `expected lookup to win "${promptText}"`);
     }
+  });
+
+  // "repo"-scoped summarization moved from lookup to investigation under the two-axis
+  // scoring surgery (T01-03): lookup.excludeKeywords now disqualifies any "repo"/
+  // "repository"/"codebase" prompt (too broad for the cheap, single-file lookup
+  // profile), while investigation.scopes gained "repo" as a breadth signal.
+  test("whole-repo summarization routes to investigation, not lookup", () => {
+    const hits = classify("summarize what this repo does", realBundles);
+    assert.ok(hits.length > 0);
+    assert.equal(hits[0]?.profile.name, "investigation");
   });
 
   test("every code-exploring profile carries the lsp and ast_grep tools", () => {
@@ -1202,9 +1211,12 @@ describe("/profile stats", () => {
       const { handlers, commands, notifications, ctx } = await installExtension(dir);
 
       // Two prompts matching "alpha", one totally unmatched prompt -> "default".
+      // (The unmatched prompt must be >=6 tokens so T01-03 stickiness — which
+      // inherits the previous turn's profile for short/continuation follow-ups
+      // with no qualifying match — doesn't pull it into "alpha" instead.)
       await handlers["before_agent_start"]!({ prompt: "alpha-kw please", systemPrompt: [] }, ctx);
       await handlers["before_agent_start"]!({ prompt: "alpha-kw again", systemPrompt: [] }, ctx);
-      await handlers["before_agent_start"]!({ prompt: "completely unrelated gibberish", systemPrompt: [] }, ctx);
+      await handlers["before_agent_start"]!({ prompt: "completely unrelated gibberish text with nothing relevant here", systemPrompt: [] }, ctx);
 
       // One successful manual pin.
       await commands["profile"]!.handler("beta", ctx);
@@ -1367,5 +1379,50 @@ describe("routing-expectations fixture: semantic-overlap regression", () => {
         assert.equal(hits[0]?.profile.name, entry.expected, trace);
       }
     });
+  });
+});
+
+// ---------- T01-03: two-axis scoring (verbs/scopes/excludeKeywords) + stickiness ----------
+
+describe("T01-03: two-axis scoring routing", () => {
+  const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+  const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+
+  test('"explore and explain this repository" -> investigation (lookup disqualified by excludeKeywords "repository")', () => {
+    const hits = classify("explore and explain this repository", realBundles);
+    assert.equal(hits[0]?.profile.name, "investigation");
+  });
+
+  test('"explain this function" -> lookup (verb + code-element scope)', () => {
+    const hits = classify("explain this function", realBundles);
+    assert.equal(hits[0]?.profile.name, "lookup");
+  });
+
+  test('"explain the auth flow" -> lookup (verb + "auth flow" scope)', () => {
+    const hits = classify("explain the auth flow", realBundles);
+    assert.equal(hits[0]?.profile.name, "lookup");
+  });
+
+  test('"what does this repo do" -> investigation ("repo" scope; lookup disqualified by excludeKeywords)', () => {
+    const hits = classify("what does this repo do", realBundles);
+    assert.equal(hits[0]?.profile.name, "investigation");
+  });
+
+  test('"fix the failing test" -> implementation ("failing test" keyword)', () => {
+    const hits = classify("fix the failing test", realBundles);
+    assert.equal(hits[0]?.profile.name, "implementation");
+  });
+
+  test("stickiness: short/continuation follow-ups inherit the previous turn's profile", () => {
+    const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("ok go on", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+
+    const third = classify("continue", realBundles, second[0]!.profile.name);
+    assert.equal(third[0]?.profile.name, "investigation");
+    assert.equal(third[0]?.inherited, true, "should be marked inherited, not freshly classified");
   });
 });

@@ -60,7 +60,8 @@
         "write code",
         "code this",
         "develop",
-        "write the implementation"
+        "write the implementation",
+        "failing test"
       ],
       "rules": [
         "Business logic lives in pure, testable functions; wire concrete dependencies only at the composition root.",
@@ -141,6 +142,16 @@
         "reproduce",
         "bug report",
         "diagnose"
+      ],
+      "scopes": [
+        "repo",
+        "repository",
+        "codebase",
+        "architecture",
+        "project",
+        "all files",
+        "everything",
+        "explore"
       ],
       "rules": [
         "A fix is not approved until its root cause is identified; symptom patches are rejected.",
@@ -250,15 +261,12 @@
       "name": "lookup",
       "description": "Find, explain, or summarize code; cheap model, read-only retrieval with citations.",
       "keywords": [
-        "find",
-        "search",
         "locate",
         "grep",
         "look up",
         "lookup",
         "where is",
         "what is",
-        "explain",
         "show me",
         "list files",
         "how does",
@@ -267,6 +275,27 @@
         "summary",
         "overview",
         "walkthrough"
+      ],
+      "verbs": [
+        "find",
+        "search",
+        "explain"
+      ],
+      "scopes": [
+        "function",
+        "method",
+        "class",
+        "flow",
+        "auth flow",
+        "variable"
+      ],
+      "excludeKeywords": [
+        "repo",
+        "repository",
+        "codebase",
+        "architecture",
+        "everything",
+        "all files"
       ],
       "rules": [
         "This profile is retrieval and summarisation; edits happen in a separate implementation pass.",

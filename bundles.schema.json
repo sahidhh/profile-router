@@ -34,6 +34,25 @@
           "minItems": 1,
           "items": { "type": "string" }
         },
+        "verbs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Weak/rhetorical action words; weight 1 (e.g. 'explain', 'find')."
+        },
+        "scopes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Code-element or breadth nouns; weight 2 (e.g. 'function', 'repository')."
+        },
+        "excludeKeywords": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Any hit disqualifies this profile (score = -Infinity)."
+        },
+        "minScore": {
+          "type": "number",
+          "description": "Qualifying score threshold for this profile; default 1 (preserves legacy score>0 routing)."
+        },
         "rules": {
           "type": "array",
           "items": { "type": "string" }

@@ -41,8 +41,8 @@
   },
   {
     "prompt": "What's the best way to onboard a new hire onto our codebase over their first week?",
-    "expected": "default",
-    "note": "near-miss — 'new hire' is not 'new module'; \"what's\" is not \"what is\""
+    "expected": "investigation",
+    "note": "T01-03: 'new hire' is not 'new module' and \"what's\" is not \"what is\" (both still near-misses), but 'codebase' is now an investigation.scopes breadth signal (weight 2), so investigation newly qualifies"
   },
   {
     "prompt": "Our deployment pipeline runs nightly and emails the team a status digest each morning.",
