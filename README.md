@@ -27,6 +27,7 @@ prompt ──► classify (keywords, no LLM) ──► merge matched profiles �
 | `API-FINDINGS.md` | file:line evidence for every OMP API the extension calls |
 | `DECISIONS.md` | Every autonomous judgment call, numbered and justified |
 | `test/profile-router.test.ts` | Unit + reachability + regression suite (`npm test`) |
+| `scripts/install-global.ts` | Copies the extension + config to the global `~/.omp` paths (`npm run install:global`) |
 | `salvage/` | The source material the 7 profiles were synthesized from |
 
 ## The shipped profiles
@@ -113,7 +114,15 @@ context.
 
 See `MANUAL.md` §1 for install paths (project: `.omp/extensions/` +
 `.omp/bundles.json`; global: `~/.omp/agent/extensions/` — note the
-`agent/` segment). Development:
+`agent/` segment). For global scope, the copy is scripted:
+
+```sh
+npm run install:global         # copy extension + config to ~/.omp (idempotent)
+npm run install:global:check   # report drift only; non-zero exit if stale
+```
+
+It copies rather than symlinks — see `MANUAL.md` §1 for why — so re-run it
+after editing `profile-router.ts` or `bundles.json`. Development:
 
 ```sh
 npm install        # dev deps only (typescript + the OMP package for types)
