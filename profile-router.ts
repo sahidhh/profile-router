@@ -42,13 +42,18 @@ export interface Profile {
   skills?: string[];           // union
   tools?: string[];            // union
   disabledAgents?: string[];   // INTERSECTION across matched profiles
-  model?: string | string[];   // single-value: highest score wins; array = fallback chain, first resolvable wins
+  model?: string[];            // fallback chain: first resolvable wins
   thinkingLevel?: string;      // single-value: highest score wins
 }
 
 export interface Bundles {
   profiles: Profile[];         // declaration order = tiebreak order
-  default?: Partial<Profile>;
+  default?: Partial<Profile> & {
+    // Rules shared by every profile (e.g. the truncation-handling rule), so the
+    // wording is declared once instead of copy-pasted into each profile's `rules`.
+    // Merge order is default.rules -> commonRules -> profile.rules (dedup by text).
+    commonRules?: RuleEntry[];
+  };
 }
 
 export interface MergedConfig {
@@ -57,7 +62,7 @@ export interface MergedConfig {
   skills: string[];
   tools: string[];
   disabledAgents: string[];
-  model?: string | string[];
+  model?: string[];
   thinkingLevel?: string;
 }
 
@@ -186,6 +191,7 @@ const CONTINUATION_PHRASES = new Set([
   "do it",
   "proceed",
   "thanks",
+  "now fix it",
 ]);
 
 function isStickyContinuation(text: string): boolean {
@@ -283,7 +289,9 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
   if (matches.length === 0) {
     // Fallback to default profile when nothing matched.
     if (bundles.default) {
-      cfg.rules = resolveRules([bundles.default.rules], new Set());
+      // Merge order: default.rules -> default.commonRules (dedup by text; commonRules
+      // holds wording shared across every profile, e.g. the truncation-handling rule).
+      cfg.rules = resolveRules([bundles.default.rules, bundles.default.commonRules], new Set());
       union(cfg.skills, bundles.default.skills);
       union(cfg.tools, bundles.default.tools);
       cfg.disabledAgents = bundles.default.disabledAgents ?? [];
@@ -296,9 +304,11 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
   // Rule suppression (Branch A): union all matched profiles' rules by text, union all
   // matched profiles' `suppresses` tags, then drop any tagged rule whose tag is killed.
   // Destructive and order-independent — a suppressing co-match always wins over union.
+  // Merge order: default.commonRules first (shared wording, deduped against any profile
+  // that still declares the same text), then each matched profile's own rules.
   const kill = new Set<string>();
   for (const { profile } of matches) for (const tag of profile.suppresses ?? []) kill.add(tag);
-  cfg.rules = resolveRules(matches.map((m) => m.profile.rules), kill);
+  cfg.rules = resolveRules([bundles.default?.commonRules, ...matches.map((m) => m.profile.rules)], kill);
 
   // disabledAgents: intersection — any matched profile that leaves an agent
   // enabled keeps it enabled overall.
@@ -347,11 +357,8 @@ export function validateBundles(bundles: Bundles): string[] {
     if (p.thinkingLevel !== undefined && !VALID_THINKING_LEVELS.includes(p.thinkingLevel)) {
       problems.push(`${label}: thinkingLevel "${p.thinkingLevel}" is not one of ${VALID_THINKING_LEVELS.join("/")}`);
     }
-    if (
-      p.model !== undefined &&
-      !(typeof p.model === "string" || (Array.isArray(p.model) && p.model.every((m) => typeof m === "string")))
-    ) {
-      problems.push(`${label}: "model" must be a string or an array of strings`);
+    if (p.model !== undefined && !(Array.isArray(p.model) && p.model.every((m) => typeof m === "string"))) {
+      problems.push(`${label}: "model" must be an array of strings`);
     }
     if (p.rules !== undefined) {
       if (!Array.isArray(p.rules)) {
@@ -399,6 +406,44 @@ export default function (pi: ExtensionAPI) {
 
   const debugLog = (msg: string, context?: Record<string, unknown>) => {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
+  };
+
+  /**
+   * Log a telemetry entry for this routing decision to .profile-router-telemetry.log.
+   * Appends one line per route (never truncates).
+   * Format: JSON-lines with timestamp, truncated prompt, chosen profile, margin, runner-up name.
+   */
+  const logTelemetry = (
+    cwd: string,
+    prompt: string,
+    chosenProfileName: string,
+    explain_rows: ReturnType<typeof explain>,
+  ) => {
+    try {
+      // Find the chosen profile's score and runner-up in the full explain ranking
+      const chosenRow = explain_rows.find((r) => r.name === chosenProfileName);
+      const chosenScore = chosenRow?.score ?? 0;
+      const runnerUpRow = explain_rows[1]; // second-highest, already sorted by explain()
+      const runnerUpScore = runnerUpRow?.score ?? 0;
+      const margin = chosenScore - runnerUpScore;
+      const runnerUpName = runnerUpRow?.name ?? null;
+
+      // Truncate prompt to safe length (200 chars)
+      const truncatedPrompt = prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt;
+
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        prompt: truncatedPrompt,
+        chosenProfile: chosenProfileName,
+        margin,
+        runnerUpProfile: runnerUpName,
+      };
+
+      const logPath = path.join(cwd, ".profile-router-telemetry.log");
+      fs.appendFileSync(logPath, JSON.stringify(logEntry) + "\n", "utf-8");
+    } catch (err) {
+      debugLog("telemetry write failed", { error: (err as Error).message });
+    }
   };
 
   // ---- Every prompt: classify, merge, inject ----
@@ -455,6 +500,12 @@ export default function (pi: ExtensionAPI) {
 
     debugLog("classified", { prompt: event.prompt.slice(0, 80), matched: next.matched });
 
+    // ---- Telemetry: log every routing decision ----
+    if (next.matched.length > 0) {
+      const explain_rows = explain(event.prompt, bundles);
+      logTelemetry(ctx.cwd, event.prompt, next.matched[0]!.name, explain_rows);
+    }
+
     // ---- Debug trace: explain WHY this prompt routed where it did (toggled via /profile debug) ----
     if (debugTrace) {
       const lines: string[] = [`🔎 Profile routing for "${event.prompt.slice(0, 60)}${event.prompt.length > 60 ? "…" : ""}"`];
@@ -481,10 +532,9 @@ export default function (pi: ExtensionAPI) {
     // `model` may be a fallback chain (["openrouter/...", "anthropic/..."]) —
     // the first spec that resolves against a credentialed provider wins.
     if (next.model) {
-      const candidates = Array.isArray(next.model) ? next.model : [next.model];
       let resolved: ReturnType<typeof ctx.models.resolve>;
       let resolvedSpec: string | undefined;
-      for (const spec of candidates) {
+      for (const spec of next.model) {
         resolved = ctx.models.resolve(spec);
         if (resolved) {
           resolvedSpec = spec;
@@ -515,11 +565,11 @@ export default function (pi: ExtensionAPI) {
           }
         }
       } else {
-        const warnKey = candidates.join(", ");
+        const warnKey = next.model.join(", ");
         if (!unresolvedModelWarned.has(warnKey)) {
           unresolvedModelWarned.add(warnKey);
           const profileNames = next.matched.map((m) => m.name).join("+") || "default";
-          ctx.ui.notify(`Profile "${profileNames}" references model${candidates.length > 1 ? "s" : ""} "${warnKey}" — none could be resolved, continuing with the current model`, "warning");
+          ctx.ui.notify(`Profile "${profileNames}" references model${next.model.length > 1 ? "s" : ""} "${warnKey}" — none could be resolved, continuing with the current model`, "warning");
         }
         debugLog("model not resolvable", { model: warnKey });
       }
@@ -545,10 +595,23 @@ export default function (pi: ExtensionAPI) {
     // Silent when profile unchanged and no rules — zero UI noise.
   });
 
-  // ---- session.compacting fires mid-run when the agent auto-compacts context. before_agent_start
-  // already re-injects the merged rules block into systemPrompt on every new prompt — this handler
-  // only covers the case where compaction happens *between* prompts, mid-turn, so a long agentic
-  // run doesn't silently lose the active rules when older messages get summarized away.
+  // ---- session.compacting fires mid-run when the agent auto-compacts context.
+  // Believed-redundant: systemPrompt is not compacted, so the active rules cannot be lost to
+  // compaction and this handler is not needed to preserve them. Verified in the installed runtime:
+  //   - node_modules/@oh-my-pi/pi-agent-core/src/agent-loop.ts:834-837 — "Refresh prompt/tool
+  //     context from live state before each model call" → calls syncContextBeforeModelCall.
+  //   - node_modules/@oh-my-pi/pi-agent-core/src/agent.ts:1150-1156 — that sync reassigns
+  //     context.systemPrompt = this.#state.systemPrompt, i.e. it is re-read from live agent state
+  //     and resent on every model call.
+  //   - node_modules/@oh-my-pi/pi-agent-core/src/compaction/compaction.ts:1094-1106
+  //     (CompactionPreparation) and :145-155 (CompactionResult) carry messages only — systemPrompt
+  //     is neither an input nor an output of compaction; the summarizer call itself swaps in
+  //     SUMMARIZATION_SYSTEM_PROMPT (:855).
+  // Retained as harmless. Note it is not literally a no-op: the returned `context` is appended to
+  // the *summarization prompt* (shared-events.ts:344-345 "Additional context lines to include in
+  // summary" → compaction.ts:826), so it can only bias the generated summary toward rule-relevant
+  // detail. That is a nice-to-have, not the rule-preservation mechanism it was written to be.
+  // See .orch/DECISIONS.md T1.
   // Event/result shapes verified at dist/types/extensibility/extensions/types.d.ts:652 and
   // dist/types/extensibility/shared-events.d.ts:66-70,276-284 (see API-FINDINGS.md).
   pi.on("session.compacting", async (_event, _ctx) => {
@@ -574,7 +637,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  const modelStr = (m?: string | string[]) => (m ? (Array.isArray(m) ? m.join(" → ") : m) : "unset");
+  const modelStr = (m?: string[]) => (m ? m.join(" → ") : "unset");
 
   /**
    * Build the injection block that contains rules and skills for system prompt injection.
@@ -608,6 +671,17 @@ export default function (pi: ExtensionAPI) {
         const mark = i === 0 ? "→" : " ";
         lines.push(`  ${mark} ${r.name}: ${r.score}  [${r.matched.join(", ")}]${i === 0 ? "  ← chosen" : ""}`);
       });
+      // Confidence margin: winner's score minus the runner-up's — the second-highest-scoring
+      // candidate profile, even if it never cleared minScore / matched. When no runner-up
+      // exists (every other profile scored 0), the margin equals the winner's full score.
+      const winner = scored[0]!;
+      const runnerUp = scored[1];
+      const margin = winner.score - (runnerUp ? runnerUp.score : 0);
+      lines.push(
+        runnerUp
+          ? `  Δ margin: ${margin} (vs runner-up "${runnerUp.name}")`
+          : `  Δ margin: ${margin} (no runner-up — full score)`,
+      );
     }
     const zero = rows.length - scored.length;
     if (zero > 0) lines.push(`  (${zero} other profile${zero === 1 ? "" : "s"} scored 0)`);

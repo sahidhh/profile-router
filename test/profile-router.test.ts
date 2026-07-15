@@ -13,7 +13,7 @@ function profile(overrides: Partial<Profile> & { name: string; keywords: string[
 
 const fixtureBundles: Bundles = {
   default: {
-    model: "anthropic/claude-sonnet-5",
+    model: ["anthropic/claude-sonnet-5"],
     thinkingLevel: "medium",
     rules: ["default-rule"],
   },
@@ -25,7 +25,7 @@ const fixtureBundles: Bundles = {
       skills: ["alpha-skill"],
       tools: ["read"],
       disabledAgents: ["task"],
-      model: "anthropic/claude-haiku-4-5-20251001",
+      model: ["anthropic/claude-haiku-4-5-20251001"],
       thinkingLevel: "low",
     }),
     profile({
@@ -35,7 +35,7 @@ const fixtureBundles: Bundles = {
       skills: ["beta-skill"],
       tools: ["edit"],
       disabledAgents: [],
-      model: "anthropic/claude-opus-4-8",
+      model: ["anthropic/claude-opus-4-8"],
       thinkingLevel: "high",
     }),
     profile({
@@ -44,7 +44,7 @@ const fixtureBundles: Bundles = {
       rules: ["gamma-rule"],
       tools: ["bash"],
       disabledAgents: ["task"],
-      model: "anthropic/claude-sonnet-5",
+      model: ["anthropic/claude-sonnet-5"],
       thinkingLevel: "medium",
     }),
     // "tie-a" and "tie-b" both match on exactly one identical keyword, so their
@@ -53,13 +53,13 @@ const fixtureBundles: Bundles = {
     profile({
       name: "tie-a",
       keywords: ["tie-kw"],
-      model: "model-a",
+      model: ["model-a"],
       thinkingLevel: "low",
     }),
     profile({
       name: "tie-b",
       keywords: ["tie-kw"],
-      model: "model-b",
+      model: ["model-b"],
       thinkingLevel: "high",
     }),
   ],
@@ -112,7 +112,7 @@ describe("merge", () => {
     const cfg = merge([], fixtureBundles);
     assert.equal(cfg.matched.length, 0);
     assert.deepEqual(cfg.rules, ["default-rule"]);
-    assert.equal(cfg.model, "anthropic/claude-sonnet-5");
+    assert.deepEqual(cfg.model, ["anthropic/claude-sonnet-5"]);
     assert.equal(cfg.thinkingLevel, "medium");
     assert.deepEqual(cfg.disabledAgents, []);
   });
@@ -124,7 +124,7 @@ describe("merge", () => {
     assert.deepEqual(cfg.skills, ["alpha-skill"]);
     assert.deepEqual(cfg.tools, ["read"]);
     assert.deepEqual(cfg.disabledAgents, ["task"]);
-    assert.equal(cfg.model, "anthropic/claude-haiku-4-5-20251001");
+    assert.deepEqual(cfg.model, ["anthropic/claude-haiku-4-5-20251001"]);
     assert.equal(cfg.thinkingLevel, "low");
   });
 
@@ -183,14 +183,14 @@ describe("merge", () => {
     // "beta-kw shared-kw" gives beta score 2, alpha/gamma score 1 -> beta's model/thinkingLevel win.
     const matches = classify("beta-kw shared-kw", fixtureBundles);
     const cfg = merge(matches, fixtureBundles);
-    assert.equal(cfg.model, "anthropic/claude-opus-4-8");
+    assert.deepEqual(cfg.model, ["anthropic/claude-opus-4-8"]);
     assert.equal(cfg.thinkingLevel, "high");
   });
 
   test("single-value fields: tie score breaks on declaration order", () => {
     const matches = classify("tie-kw", fixtureBundles);
     const cfg = merge(matches, fixtureBundles);
-    assert.equal(cfg.model, "model-a"); // tie-a declared before tie-b
+    assert.deepEqual(cfg.model, ["model-a"]); // tie-a declared before tie-b
     assert.equal(cfg.thinkingLevel, "low");
   });
 
@@ -199,7 +199,7 @@ describe("merge", () => {
     const cfg = merge([{ profile: overrideProfile, score: Number.POSITIVE_INFINITY }], fixtureBundles);
     assert.deepEqual(cfg.matched, [{ name: "gamma", score: Number.POSITIVE_INFINITY }]);
     assert.deepEqual(cfg.rules, ["gamma-rule"]);
-    assert.equal(cfg.model, "anthropic/claude-sonnet-5");
+    assert.deepEqual(cfg.model, ["anthropic/claude-sonnet-5"]);
   });
 
   // ---- Branch A rule suppression: union(rules) MINUS union(suppresses-by-tag) ----
@@ -263,6 +263,88 @@ describe("merge", () => {
     const matches = classify("shared-kw only", fixtureBundles); // alpha/beta/gamma, all plain-string rules, no suppresses
     const cfg = merge(matches, fixtureBundles);
     assert.deepEqual(cfg.rules.sort(), ["alpha-rule", "beta-rule", "gamma-rule"].sort());
+  });
+
+  // ---- T2: symmetric suppression (readonly-scope tag) ----
+
+  test("symmetric suppression: co-matched profiles each suppress the other's tagged rule, regardless of order", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({
+          name: "readonly",
+          keywords: ["readonly-kw"],
+          suppresses: ["write-scope"],
+          rules: ["untagged-shared", { tag: "readonly-scope", text: "edits happen in a separate pass" }],
+        }),
+        profile({
+          name: "writer",
+          keywords: ["writer-kw"],
+          suppresses: ["readonly-scope"],
+          rules: ["untagged-shared", { tag: "write-scope", text: "make the edit now" }],
+        }),
+      ],
+    };
+    const forward = merge(
+      [{ profile: bundles.profiles[0]!, score: 1 }, { profile: bundles.profiles[1]!, score: 1 }],
+      bundles,
+    );
+    const reverse = merge(
+      [{ profile: bundles.profiles[1]!, score: 1 }, { profile: bundles.profiles[0]!, score: 1 }],
+      bundles,
+    );
+    for (const cfg of [forward, reverse]) {
+      assert.deepEqual(
+        cfg.rules,
+        ["untagged-shared"],
+        `both tagged rules must be mutually suppressed on co-match, order-independent: ${cfg.rules.join(", ")}`,
+      );
+    }
+  });
+
+  test("symmetric suppression: a profile matched alone still carries its own tagged rule (suppression only fires on co-match)", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({
+          name: "readonly",
+          keywords: ["readonly-kw"],
+          suppresses: ["write-scope"],
+          rules: [{ tag: "readonly-scope", text: "edits happen in a separate pass" }],
+        }),
+      ],
+    };
+    const cfg = merge(classify("readonly-kw", bundles), bundles);
+    assert.deepEqual(cfg.rules, ["edits happen in a separate pass"]);
+  });
+
+  // ---- T3: shared commonRules ----
+
+  test("commonRules: merged in for a single-profile match alongside its own rules, present exactly once", () => {
+    const bundles: Bundles = {
+      default: { commonRules: ["shared-truncation-rule"] },
+      profiles: [profile({ name: "solo", keywords: ["solo-kw"], rules: ["solo-only-rule"] })],
+    };
+    const cfg = merge(classify("solo-kw", bundles), bundles);
+    assert.deepEqual(cfg.rules.sort(), ["shared-truncation-rule", "solo-only-rule"].sort());
+    assert.equal(cfg.rules.filter((r) => r === "shared-truncation-rule").length, 1);
+  });
+
+  test("commonRules: deduped when a profile also happens to declare the same text verbatim", () => {
+    const bundles: Bundles = {
+      default: { commonRules: ["shared-truncation-rule"] },
+      profiles: [profile({ name: "solo", keywords: ["solo-kw"], rules: ["shared-truncation-rule", "solo-only-rule"] })],
+    };
+    const cfg = merge(classify("solo-kw", bundles), bundles);
+    assert.equal(cfg.rules.filter((r) => r === "shared-truncation-rule").length, 1);
+    assert.deepEqual(cfg.rules.sort(), ["shared-truncation-rule", "solo-only-rule"].sort());
+  });
+
+  test("commonRules: also merged into the no-match default fallback path, alongside default.rules", () => {
+    const bundles: Bundles = {
+      default: { rules: ["default-only-rule"], commonRules: ["shared-truncation-rule"] },
+      profiles: [profile({ name: "unrelated", keywords: ["unrelated-kw"] })],
+    };
+    const cfg = merge([], bundles);
+    assert.deepEqual(cfg.rules.sort(), ["default-only-rule", "shared-truncation-rule"].sort());
   });
 });
 
@@ -582,6 +664,82 @@ describe("bundles.json reachability", () => {
       for (const text of taggedRuleTexts(implementationProfile, [tag])) {
         assert.ok(!coMatched.rules.includes(text), `co-matched rules must not contain implementation's "${tag}" rule: "${text}"`);
       }
+    }
+  });
+
+  // ---- T2: symmetric suppression against the real bundles.json ----
+
+  test("T2: readonly-scope tag is symmetric — lookup's scope-statement rule is suppressed when co-matched with a write profile", () => {
+    const lookupProfile = realBundles.profiles.find((p) => p.name === "lookup")!;
+    const implementationProfile = realBundles.profiles.find((p) => p.name === "implementation")!;
+    assert.ok(implementationProfile.suppresses?.includes("readonly-scope"), "implementation must suppress readonly-scope");
+
+    const readonlyScopeTexts = taggedRuleTexts(lookupProfile, ["readonly-scope"]);
+    assert.ok(readonlyScopeTexts.length > 0, "lookup must declare a readonly-scope-tagged rule");
+
+    // Alone, lookup's scope statement is present (matches the "lookup alone" golden behavior).
+    const alone = merge([{ profile: lookupProfile, score: 5 }], realBundles);
+    for (const text of readonlyScopeTexts) assert.ok(alone.rules.includes(text));
+
+    // Co-matched with a write profile, the scope statement must be suppressed — it would
+    // otherwise contradict the write profile's live edit mandate.
+    const coMatched = merge(
+      [{ profile: lookupProfile, score: 5 }, { profile: implementationProfile, score: 5 }],
+      realBundles,
+    );
+    for (const text of readonlyScopeTexts) {
+      assert.ok(!coMatched.rules.includes(text), `co-matched rules must not contain lookup's readonly-scope rule: "${text}"`);
+    }
+    // The conditional escape-hatch rule (untagged) is a different concern and must still survive.
+    assert.ok(coMatched.rules.includes(ESCAPE_HATCH));
+  });
+
+  test("T2: every capabilities.write===true profile declares suppresses including readonly-scope, symmetric with every write:false profile's readonly-scope rule", () => {
+    const writeTrueProfiles = realBundles.profiles.filter((p) => p.capabilities?.write === true);
+    assert.ok(writeTrueProfiles.length > 0);
+    for (const wp of writeTrueProfiles) {
+      assert.ok(wp.suppresses?.includes("readonly-scope"), `write profile "${wp.name}" must suppress "readonly-scope"`);
+    }
+
+    const readonlyScopeProfiles = realBundles.profiles.filter((p) =>
+      (p.rules ?? []).some((r) => typeof r !== "string" && r.tag === "readonly-scope"),
+    );
+    assert.ok(readonlyScopeProfiles.length > 0, "at least one profile must declare a readonly-scope rule");
+
+    for (const rp of readonlyScopeProfiles) {
+      const texts = taggedRuleTexts(rp, ["readonly-scope"]);
+      for (const wp of writeTrueProfiles) {
+        const cfg = merge([{ profile: rp, score: 5 }, { profile: wp, score: 5 }], realBundles);
+        for (const text of texts) {
+          assert.ok(
+            !cfg.rules.includes(text),
+            `"${rp.name}" co-matched with write profile "${wp.name}" must not carry readonly-scope rule: "${text}"`,
+          );
+        }
+      }
+    }
+  });
+
+  // ---- T3: shared commonRules against the real bundles.json ----
+
+  test("T3: the truncation rule lives in default.commonRules, not duplicated in any profile's own rules", () => {
+    const TRUNCATION_RULE =
+      "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names.";
+    assert.ok(realBundles.default?.commonRules?.includes(TRUNCATION_RULE), "default.commonRules must include the truncation rule verbatim");
+
+    for (const p of realBundles.profiles) {
+      const ownTexts = (p.rules ?? []).map((r) => (typeof r === "string" ? r : r.text));
+      assert.ok(!ownTexts.includes(TRUNCATION_RULE), `profile "${p.name}" must not duplicate the truncation rule in its own rules`);
+    }
+  });
+
+  test("T3: every profile's resolved rule set carries the truncation rule exactly once", () => {
+    const TRUNCATION_RULE =
+      "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names.";
+    for (const p of realBundles.profiles) {
+      const cfg = merge([{ profile: p, score: 5 }], realBundles);
+      const count = cfg.rules.filter((r) => r === TRUNCATION_RULE).length;
+      assert.equal(count, 1, `profile "${p.name}" resolved rules must carry the truncation rule exactly once, got ${count}: ${cfg.rules.join(", ")}`);
     }
   });
 });
@@ -928,7 +1086,7 @@ describe("F3 regression: unresolvable model warns exactly once per session", () 
   test("notifies naming the profile and bad model string, then degrades silently on repeat", async () => {
     await withTempProjectDir(async (dir) => {
       const bundles: Bundles = {
-        profiles: [profile({ name: "broken-model-profile", keywords: ["trigger-kw"], model: "anthropic/does-not-exist" })],
+        profiles: [profile({ name: "broken-model-profile", keywords: ["trigger-kw"], model: ["anthropic/does-not-exist"] })],
       };
       writeBundles(dir, bundles);
 
@@ -1086,6 +1244,52 @@ describe("/profile debug toggle", () => {
         0,
         "no trace once debug is off",
       );
+    });
+  });
+});
+
+describe("/profile debug trace: confidence margin", () => {
+  test("clear winner with a runner-up shows margin = winner score - runner-up score", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          // winner scores 2 (two keyword hits), runner-up scores 1 (one keyword hit)
+          profile({ name: "winner", keywords: ["win-kw", "extra-kw"] }),
+          profile({ name: "runner", keywords: ["run-kw"] }),
+        ],
+      });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("explain win-kw extra-kw run-kw prompt", ctx);
+
+      assert.equal(notifications.length, 1);
+      const trace = notifications[0]!.msg;
+      assert.ok(trace.includes("winner: 2"), "winner should score 2");
+      assert.ok(trace.includes("runner: 1"), "runner-up should score 1");
+      assert.ok(trace.includes("Δ margin: 1"), "margin should be winner(2) - runner-up(1) = 1");
+      assert.ok(trace.includes('vs runner-up "runner"'), "should name the runner-up profile");
+    });
+  });
+
+  test("only one profile matching (no runner-up) shows margin as the winner's full score", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "lonewinner", keywords: ["lone-kw"] }),
+          profile({ name: "unrelated", keywords: ["nomatch-kw"] }),
+        ],
+      });
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      notifications.length = 0;
+      await commands["profile"]!.handler("explain lone-kw prompt", ctx);
+
+      assert.equal(notifications.length, 1);
+      const trace = notifications[0]!.msg;
+      assert.ok(trace.includes("lonewinner: 1"), "lone winner should score 1");
+      assert.ok(trace.includes("Δ margin: 1"), "margin should equal the winner's full score");
+      assert.ok(trace.includes("no runner-up"), "should indicate there was no runner-up");
     });
   });
 });
@@ -1366,7 +1570,7 @@ describe("/profile stats", () => {
   test("model switch counters increment on accepted and declined confirm decisions (bonus)", async () => {
     await withTempProjectDir(async (dir) => {
       writeBundles(dir, {
-        profiles: [profile({ name: "chain-profile", keywords: ["chain-kw"], model: "anthropic/claude-sonnet-5" })],
+        profiles: [profile({ name: "chain-profile", keywords: ["chain-kw"], model: ["anthropic/claude-sonnet-5"] })],
       });
       const { handlers, commands, notifications, ctx } = await installExtension(dir);
       const sonnet = { id: "claude-sonnet-5", provider: "anthropic", name: "Sonnet" };
@@ -1541,6 +1745,11 @@ describe("T01-03: two-axis scoring routing", () => {
     assert.equal(hits[0]?.profile.name, "implementation");
   });
 
+  test('"urgent fix for the schema migration" -> premium (hotfix disqualified by excludeKeywords "schema"/"migration")', () => {
+    const hits = classify("urgent fix for the schema migration", realBundles);
+    assert.equal(hits[0]?.profile.name, "premium");
+  });
+
   test("stickiness: short/continuation follow-ups inherit the previous turn's profile", () => {
     const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
     assert.equal(first[0]?.profile.name, "investigation");
@@ -1552,6 +1761,42 @@ describe("T01-03: two-axis scoring routing", () => {
     const third = classify("continue", realBundles, second[0]!.profile.name);
     assert.equal(third[0]?.profile.name, "investigation");
     assert.equal(third[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
+
+  test('stickiness: "continue" triggers sticky continuation', () => {
+    const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("continue", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
+
+  test('stickiness: "now fix it" triggers sticky continuation', () => {
+    const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("now fix it", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
+
+  test('stickiness: "go on" triggers sticky continuation', () => {
+    const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("go on", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
+
+  test('stickiness: "next" triggers sticky continuation', () => {
+    const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("next", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
   });
 });
 
@@ -1619,5 +1864,103 @@ describe("golden: prod-failure regression lock", () => {
     for (const text of bannedTexts) {
       assert.ok(!resolved.rules.includes(text), `co-matched resolved rules must not contain suppressed rule: "${text}"`);
     }
+  });
+});
+
+describe("telemetry: routing decisions logged to .profile-router-telemetry.log", () => {
+  test("appends exactly one line per route decision", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["alpha-kw"] }),
+          profile({ name: "beta", keywords: ["beta-kw"] }),
+        ],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      // First routing decision
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw test", systemPrompt: [] }, ctx);
+      const lines1 = fs.readFileSync(logPath, "utf-8").trim().split("\n");
+      assert.equal(lines1.length, 1, "should have exactly one line after first route");
+
+      // Second routing decision
+      await handlers["before_agent_start"]!({ prompt: "beta-kw test", systemPrompt: [] }, ctx);
+      const lines2 = fs.readFileSync(logPath, "utf-8").trim().split("\n");
+      assert.equal(lines2.length, 2, "should have exactly two lines after second route (append-only)");
+    });
+  });
+
+  test("logs correct fields: timestamp, truncated prompt, chosen profile, margin, runner-up", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["alpha-kw"] }),
+          profile({ name: "beta", keywords: ["beta-kw"] }),
+        ],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      // Route to alpha (it has 1 keyword match, beta has 0)
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw test", systemPrompt: [] }, ctx);
+
+      const logContent = fs.readFileSync(logPath, "utf-8").trim();
+      const logEntry = JSON.parse(logContent);
+
+      // Verify all required fields exist
+      assert.ok(logEntry.timestamp, "should have timestamp");
+      assert.ok(typeof logEntry.timestamp === "string", "timestamp should be string");
+      assert.ok(logEntry.prompt, "should have prompt");
+      assert.equal(logEntry.chosenProfile, "alpha", "should log chosen profile");
+      assert.equal(typeof logEntry.margin, "number", "should have numeric margin");
+      assert.equal(logEntry.runnerUpProfile, "beta", "should log runner-up profile name");
+    });
+  });
+
+  test("truncates long prompts to ~200 chars", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      // Create a long prompt (> 200 chars)
+      const longPrompt = "alpha-kw " + "a".repeat(300);
+      await handlers["before_agent_start"]!({ prompt: longPrompt, systemPrompt: [] }, ctx);
+
+      const logContent = fs.readFileSync(logPath, "utf-8").trim();
+      const logEntry = JSON.parse(logContent);
+
+      // Verify prompt is truncated to ~200 chars + "…"
+      assert.ok(logEntry.prompt.length <= 202, "prompt should be truncated to ~200 chars + ellipsis");
+      assert.ok(logEntry.prompt.endsWith("…"), "truncated prompt should end with ellipsis");
+    });
+  });
+
+  test("computes margin as winner score minus runner-up score", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "strong", keywords: ["test-kw", "other-kw"] }), // 2 hits
+          profile({ name: "weak", keywords: ["test-kw"] }), // 1 hit
+          profile({ name: "none", keywords: ["unrelated-kw"] }), // 0 hits
+        ],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      // Route to strong (score 2) vs weak (score 1) vs none (score 0)
+      await handlers["before_agent_start"]!({ prompt: "test-kw other-kw content", systemPrompt: [] }, ctx);
+
+      const logContent = fs.readFileSync(logPath, "utf-8").trim();
+      const logEntry = JSON.parse(logContent);
+
+      // Margin should be winner (2) - runner-up (1) = 1
+      assert.equal(logEntry.margin, 1, "margin should be 2 - 1 = 1");
+      assert.equal(logEntry.chosenProfile, "strong", "should choose strong");
+      assert.equal(logEntry.runnerUpProfile, "weak", "runner-up should be weak");
+    });
   });
 });
