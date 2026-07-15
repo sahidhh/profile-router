@@ -34,9 +34,43 @@
           "minItems": 1,
           "items": { "type": "string" }
         },
+        "verbs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Weak/rhetorical action words; weight 1 (e.g. 'explain', 'find')."
+        },
+        "scopes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Code-element or breadth nouns; weight 2 (e.g. 'function', 'repository')."
+        },
+        "excludeKeywords": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Any hit disqualifies this profile (score = -Infinity)."
+        },
+        "minScore": {
+          "type": "number",
+          "description": "Qualifying score threshold for this profile; default 1 (preserves legacy score>0 routing)."
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "read": { "type": "boolean" },
+            "write": { "type": "boolean" },
+            "execute": { "type": "boolean" }
+          },
+          "description": "Declarative capability flags; write:false profiles get the read-only escape-hatch rule convention."
+        },
+        "suppresses": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Rule tags this profile removes from the merged rule set (union across all matched profiles; destructive, order-independent)."
+        },
         "rules": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": { "$ref": "#/definitions/ruleEntry" }
         },
         "skills": {
           "type": "array",
@@ -62,6 +96,20 @@
         }
       }
     },
+    "ruleEntry": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tag", "text"],
+          "properties": {
+            "tag": { "type": "string", "minLength": 1 },
+            "text": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
     "partialProfile": {
       "type": "object",
       "additionalProperties": false,
@@ -80,7 +128,7 @@
         },
         "rules": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": { "$ref": "#/definitions/ruleEntry" }
         },
         "skills": {
           "type": "array",

@@ -201,6 +201,69 @@ describe("merge", () => {
     assert.deepEqual(cfg.rules, ["gamma-rule"]);
     assert.equal(cfg.model, "anthropic/claude-sonnet-5");
   });
+
+  // ---- Branch A rule suppression: union(rules) MINUS union(suppresses-by-tag) ----
+
+  test("tagged rule suppression: a co-matched profile's suppresses removes another profile's tagged rule", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({
+          name: "writer",
+          keywords: ["writer-kw"],
+          rules: ["untagged-shared", { tag: "verify", text: "must-run-tests" }, { tag: "implement", text: "must-write-code" }],
+        }),
+        profile({
+          name: "reader",
+          keywords: ["reader-kw"],
+          suppresses: ["verify", "implement"],
+          rules: ["reader-only-rule"],
+        }),
+      ],
+    };
+    const cfg = merge(
+      [{ profile: bundles.profiles[0]!, score: 1 }, { profile: bundles.profiles[1]!, score: 1 }],
+      bundles,
+    );
+    assert.deepEqual(
+      cfg.rules.sort(),
+      ["untagged-shared", "reader-only-rule"].sort(),
+      `expected tagged rules suppressed, untagged rules kept: ${cfg.rules.join(", ")}`,
+    );
+  });
+
+  test("tagged rule suppression is order-independent (destructive regardless of matched-array order)", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({ name: "writer", keywords: ["writer-kw"], rules: [{ tag: "cleanup", text: "must-cleanup" }] }),
+        profile({ name: "reader", keywords: ["reader-kw"], suppresses: ["cleanup"], rules: [] }),
+      ],
+    };
+    const forward = merge([{ profile: bundles.profiles[0]!, score: 1 }, { profile: bundles.profiles[1]!, score: 1 }], bundles);
+    const reverse = merge([{ profile: bundles.profiles[1]!, score: 1 }, { profile: bundles.profiles[0]!, score: 1 }], bundles);
+    assert.deepEqual(forward.rules, []);
+    assert.deepEqual(reverse.rules, []);
+  });
+
+  test("a profile's own suppresses does not remove its own untagged or unrelated-tag rules", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({
+          name: "self",
+          keywords: ["self-kw"],
+          suppresses: ["verify"],
+          rules: ["plain-rule", { tag: "other-tag", text: "unaffected-tag-rule" }, { tag: "verify", text: "self-verify-rule" }],
+        }),
+      ],
+    };
+    const cfg = merge(classify("self-kw", bundles), bundles);
+    assert.deepEqual(cfg.rules.sort(), ["plain-rule", "unaffected-tag-rule"].sort());
+  });
+
+  test("legacy plain-string rules remain fully backward-compatible (never suppressed, unaffected by suppresses)", () => {
+    const matches = classify("shared-kw only", fixtureBundles); // alpha/beta/gamma, all plain-string rules, no suppresses
+    const cfg = merge(matches, fixtureBundles);
+    assert.deepEqual(cfg.rules.sort(), ["alpha-rule", "beta-rule", "gamma-rule"].sort());
+  });
 });
 
 // ---------- explain() ----------
@@ -397,7 +460,6 @@ describe("bundles.json reachability", () => {
 
   test("summarisation vocabulary routes to lookup (cheap model), not a judgment profile", () => {
     for (const promptText of [
-      "summarize what this repo does",
       "give me an overview of the payment flow",
       "summarise the config loading logic",
     ]) {
@@ -405,6 +467,16 @@ describe("bundles.json reachability", () => {
       assert.ok(hits.length > 0, `expected a match for: "${promptText}"`);
       assert.equal(hits[0]?.profile.name, "lookup", `expected lookup to win "${promptText}"`);
     }
+  });
+
+  // "repo"-scoped summarization moved from lookup to investigation under the two-axis
+  // scoring surgery (T01-03): lookup.excludeKeywords now disqualifies any "repo"/
+  // "repository"/"codebase" prompt (too broad for the cheap, single-file lookup
+  // profile), while investigation.scopes gained "repo" as a breadth signal.
+  test("whole-repo summarization routes to investigation, not lookup", () => {
+    const hits = classify("summarize what this repo does", realBundles);
+    assert.ok(hits.length > 0);
+    assert.equal(hits[0]?.profile.name, "investigation");
   });
 
   test("every code-exploring profile carries the lsp and ast_grep tools", () => {
@@ -442,10 +514,75 @@ describe("bundles.json reachability", () => {
     const cfg = merge(classified, realBundles);
     const rulesJoined = cfg.rules.join("\n");
 
-    // Assert no prohibition language exists in merged rules.
-    assert.ok(!/read-only/i.test(rulesJoined), `merged rules must not contain "read-only": ${rulesJoined}`);
+    // Assert no blanket edit-prohibition language exists in merged rules. Note: lookup's
+    // conditional escape-hatch rule ("If the request exceeds read-only scope, state that
+    // and stop...") legitimately mentions "read-only" — that is scoped guidance for lookup
+    // alone, not a ban that should block implementation's co-matched write mandate, so it's
+    // excluded from this check (see T04-06 "co-matching implementation and lookup" golden test).
+    assert.ok(!/is read-only/i.test(rulesJoined), `merged rules must not contain "is read-only": ${rulesJoined}`);
     assert.ok(!/do not (edit|write)/i.test(rulesJoined), `merged rules must not contain "do not edit/write": ${rulesJoined}`);
     assert.ok(!/no (code )?edits?/i.test(rulesJoined), `merged rules must not contain "no edits": ${rulesJoined}`);
+  });
+
+  const ESCAPE_HATCH =
+    "If the request exceeds read-only scope, state that and stop. Yielding for insufficient scope is a correct outcome, not an incomplete deliverable.";
+  const SUPPRESSIBLE_TAGS = ["implement", "verify", "cleanup", "completeness-contract"];
+
+  // Extracts the {tag,text} rule entries actually declared for a profile, ignoring plain strings.
+  const taggedRuleTexts = (p: Profile, tags: string[]): string[] =>
+    (p.rules ?? [])
+      .filter((r): r is { tag: string; text: string } => typeof r !== "string" && tags.includes(r.tag))
+      .map((r) => r.text);
+
+  test("T04-06 invariant: every capabilities.write===false profile resolves with no implement/verify/cleanup/completeness-contract rule, alone or co-matched with implementation", () => {
+    const implementationProfile = realBundles.profiles.find((p) => p.name === "implementation")!;
+    assert.ok(implementationProfile, "fixture must declare an implementation profile");
+
+    const writeFalseProfiles = realBundles.profiles.filter((p) => p.capabilities?.write === false);
+    assert.ok(writeFalseProfiles.length > 0, "expected at least one write:false profile in bundles.json");
+
+    for (const p of writeFalseProfiles) {
+      for (const matches of [
+        [{ profile: p, score: 5 }],
+        [{ profile: p, score: 5 }, { profile: implementationProfile, score: 5 }],
+      ]) {
+        const cfg = merge(matches, realBundles);
+        for (const tag of SUPPRESSIBLE_TAGS) {
+          const banned = taggedRuleTexts(implementationProfile, [tag]);
+          for (const text of banned) {
+            assert.ok(
+              !cfg.rules.includes(text),
+              `profile "${p.name}" (co-matched: ${matches.map((m) => m.profile.name).join("+")}) must not carry implementation's "${tag}"-tagged rule: "${text}"`,
+            );
+          }
+        }
+      }
+    }
+  });
+
+  test("T06 golden: lookup's escape-hatch rule survives suppression, alone and co-matched with implementation", () => {
+    const lookupProfile = realBundles.profiles.find((p) => p.name === "lookup")!;
+    const implementationProfile = realBundles.profiles.find((p) => p.name === "implementation")!;
+    assert.equal(lookupProfile.capabilities?.write, false, "lookup must be capabilities.write===false");
+    assert.deepEqual(lookupProfile.suppresses?.slice().sort(), SUPPRESSIBLE_TAGS.slice().sort());
+
+    const alone = merge([{ profile: lookupProfile, score: 5 }], realBundles);
+    assert.ok(alone.rules.includes(ESCAPE_HATCH), `lookup alone must include the escape-hatch rule: ${alone.rules.join("\n")}`);
+
+    const coMatched = merge(
+      [{ profile: lookupProfile, score: 5 }, { profile: implementationProfile, score: 5 }],
+      realBundles,
+    );
+    assert.ok(
+      coMatched.rules.includes(ESCAPE_HATCH),
+      `lookup co-matched with implementation must still include the escape-hatch rule: ${coMatched.rules.join("\n")}`,
+    );
+    // And the write mandates implementation carries must be gone from the resolved set.
+    for (const tag of ["implement", "verify", "cleanup"]) {
+      for (const text of taggedRuleTexts(implementationProfile, [tag])) {
+        assert.ok(!coMatched.rules.includes(text), `co-matched rules must not contain implementation's "${tag}" rule: "${text}"`);
+      }
+    }
   });
 });
 
@@ -1202,9 +1339,12 @@ describe("/profile stats", () => {
       const { handlers, commands, notifications, ctx } = await installExtension(dir);
 
       // Two prompts matching "alpha", one totally unmatched prompt -> "default".
+      // (The unmatched prompt must be >=6 tokens so T01-03 stickiness — which
+      // inherits the previous turn's profile for short/continuation follow-ups
+      // with no qualifying match — doesn't pull it into "alpha" instead.)
       await handlers["before_agent_start"]!({ prompt: "alpha-kw please", systemPrompt: [] }, ctx);
       await handlers["before_agent_start"]!({ prompt: "alpha-kw again", systemPrompt: [] }, ctx);
-      await handlers["before_agent_start"]!({ prompt: "completely unrelated gibberish", systemPrompt: [] }, ctx);
+      await handlers["before_agent_start"]!({ prompt: "completely unrelated gibberish text with nothing relevant here", systemPrompt: [] }, ctx);
 
       // One successful manual pin.
       await commands["profile"]!.handler("beta", ctx);
@@ -1367,5 +1507,117 @@ describe("routing-expectations fixture: semantic-overlap regression", () => {
         assert.equal(hits[0]?.profile.name, entry.expected, trace);
       }
     });
+  });
+});
+
+// ---------- T01-03: two-axis scoring (verbs/scopes/excludeKeywords) + stickiness ----------
+
+describe("T01-03: two-axis scoring routing", () => {
+  const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+  const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+
+  test('"explore and explain this repository" -> investigation (lookup disqualified by excludeKeywords "repository")', () => {
+    const hits = classify("explore and explain this repository", realBundles);
+    assert.equal(hits[0]?.profile.name, "investigation");
+  });
+
+  test('"explain this function" -> lookup (verb + code-element scope)', () => {
+    const hits = classify("explain this function", realBundles);
+    assert.equal(hits[0]?.profile.name, "lookup");
+  });
+
+  test('"explain the auth flow" -> lookup (verb + "auth flow" scope)', () => {
+    const hits = classify("explain the auth flow", realBundles);
+    assert.equal(hits[0]?.profile.name, "lookup");
+  });
+
+  test('"what does this repo do" -> investigation ("repo" scope; lookup disqualified by excludeKeywords)', () => {
+    const hits = classify("what does this repo do", realBundles);
+    assert.equal(hits[0]?.profile.name, "investigation");
+  });
+
+  test('"fix the failing test" -> implementation ("failing test" keyword)', () => {
+    const hits = classify("fix the failing test", realBundles);
+    assert.equal(hits[0]?.profile.name, "implementation");
+  });
+
+  test("stickiness: short/continuation follow-ups inherit the previous turn's profile", () => {
+    const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("ok go on", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+
+    const third = classify("continue", realBundles, second[0]!.profile.name);
+    assert.equal(third[0]?.profile.name, "investigation");
+    assert.equal(third[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
+});
+
+// ---------- T09: golden regression fixtures locking in exact prod failures ----------
+
+describe("golden: prod-failure regression lock", () => {
+  const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+  const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+
+  test('golden #1: "explain this repo - optimal scan use micro sub-agents or tools" -> investigation', () => {
+    const hits = classify("explain this repo - optimal scan use micro sub-agents or tools", realBundles);
+    assert.equal(hits[0]?.profile.name, "investigation");
+  });
+
+  test('golden #2: "ok, go on" as turn 2 after golden #1 -> investigation, inherited via stickiness', () => {
+    const first = classify("explain this repo - optimal scan use micro sub-agents or tools", realBundles);
+    assert.equal(first[0]?.profile.name, "investigation");
+
+    const second = classify("ok, go on", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+  });
+
+  test('golden #3: "explore and explain this repository" -> investigation', () => {
+    const hits = classify("explore and explain this repository", realBundles);
+    assert.equal(hits[0]?.profile.name, "investigation");
+  });
+
+  test("golden #4: lookup's RESOLVED rule set (alone) carries zero implement/verify/cleanup-tagged rules", () => {
+    const lookupProfile = realBundles.profiles.find((p) => p.name === "lookup")!;
+    assert.ok(lookupProfile, "fixture must declare a lookup profile");
+
+    const resolved = merge([{ profile: lookupProfile, score: 5 }], realBundles);
+    const mandateLike = resolved.rules.filter((r) =>
+      /\b(implement|write code|verify|run (tests|npm)|clean ?up|complete(ness)?[- ]contract)\b/i.test(r),
+    );
+    assert.deepEqual(
+      mandateLike,
+      [],
+      `lookup's resolved rules must mandate no write/verify/cleanup action: ${JSON.stringify(resolved.rules)}`,
+    );
+  });
+
+  test("golden #5: semantic-overlap lookup+implementation co-match -> no contradictory write mandates survive; escape-hatch present, read-only wins", () => {
+    const lookupProfile = realBundles.profiles.find((p) => p.name === "lookup")!;
+    const implementationProfile = realBundles.profiles.find((p) => p.name === "implementation")!;
+
+    const resolved = merge(
+      [{ profile: lookupProfile, score: 5 }, { profile: implementationProfile, score: 5 }],
+      realBundles,
+    );
+    const rulesJoined = resolved.rules.join("\n");
+
+    // Escape hatch (untagged, never suppressed) must survive.
+    assert.ok(
+      /exceeds read-only scope, state that and stop/i.test(rulesJoined),
+      `co-matched resolved rules must retain lookup's escape-hatch rule: ${rulesJoined}`,
+    );
+
+    // Implementation's tagged write/verify/cleanup mandates must not survive lookup's suppresses.
+    const bannedTags = ["implement", "verify", "cleanup"];
+    const bannedTexts = (implementationProfile.rules ?? [])
+      .filter((r): r is { tag: string; text: string } => typeof r !== "string" && bannedTags.includes(r.tag))
+      .map((r) => r.text);
+    for (const text of bannedTexts) {
+      assert.ok(!resolved.rules.includes(text), `co-matched resolved rules must not contain suppressed rule: "${text}"`);
+    }
   });
 });

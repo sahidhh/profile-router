@@ -24,6 +24,8 @@
         "redesign",
         "architectural decision"
       ],
+      "capabilities": { "read": true, "write": false, "execute": false },
+      "suppresses": ["implement", "verify", "cleanup", "completeness-contract"],
       "rules": [
         "Decide system shape by reading and comparing alternatives; implementation is a separate, later step.",
         "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads.",
@@ -31,7 +33,9 @@
         "Invariants that must never break belong in the database, not application code.",
         "A second real consumer justifies an abstraction; a contract-free wrapper around one implementation does not.",
         "Log rejected alternatives with their reason — an ADR without them is incomplete.",
-        "No layer calls back upstream; no layer skips a layer."
+        "No layer calls back upstream; no layer skips a layer.",
+        "If the request exceeds read-only scope, state that and stop. Yielding for insufficient scope is a correct outcome, not an incomplete deliverable.",
+        "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names."
       ],
       "skills": [
         "adr-writer"
@@ -60,15 +64,19 @@
         "write code",
         "code this",
         "develop",
-        "write the implementation"
+        "write the implementation",
+        "failing test"
       ],
+      "capabilities": { "read": true, "write": true, "execute": true },
       "rules": [
-        "Business logic lives in pure, testable functions; wire concrete dependencies only at the composition root.",
-        "A change is not handed off until build/test reports clean.",
+        { "tag": "implement", "text": "Business logic lives in pure, testable functions; wire concrete dependencies only at the composition root." },
+        { "tag": "verify", "text": "A change is not handed off until build/test reports clean." },
         "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads.",
         "Derived data is recomputed at read time, not persisted, when reversible and cheap.",
         "Prefer the framework's native facility over a custom abstraction.",
-        "Each module has exactly one reason to change."
+        "Each module has exactly one reason to change.",
+        { "tag": "cleanup", "text": "Once the fix or feature lands, remove dead code paths and stale comments the change makes obsolete." },
+        "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names."
       ],
       "skills": [],
       "tools": [
@@ -101,13 +109,17 @@
         "pull request review",
         "verdict"
       ],
+      "capabilities": { "read": true, "write": false, "execute": false },
+      "suppresses": ["implement", "verify", "cleanup", "completeness-contract"],
       "rules": [
         "Findings are append-only and severity-tiered; never silently deleted.",
         "Review categories are fixed: Security / Performance / Architecture / DB / Async / Tests / Hygiene / API Design.",
         "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads.",
         "Merge-readiness gate: build clean, tests pass, forbidden-pattern grep clean, no unresolved Critical/High finding.",
         "Max 2 review fix cycles; a third failure halts the loop for human escalation.",
-        "Review produces severity-tiered findings; a separate pass implements any accepted fix."
+        "Review produces severity-tiered findings; a separate pass implements any accepted fix.",
+        "If the request exceeds read-only scope, state that and stop. Yielding for insufficient scope is a correct outcome, not an incomplete deliverable.",
+        "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names."
       ],
       "skills": [
         "merge-readiness-checklist",
@@ -142,11 +154,25 @@
         "bug report",
         "diagnose"
       ],
+      "scopes": [
+        "repo",
+        "repository",
+        "codebase",
+        "architecture",
+        "project",
+        "all files",
+        "everything",
+        "explore"
+      ],
+      "capabilities": { "read": true, "write": false, "execute": true },
+      "suppresses": ["implement", "verify", "cleanup", "completeness-contract"],
       "rules": [
         "A fix is not approved until its root cause is identified; symptom patches are rejected.",
         "Search-first, read-restrained: locate via lsp symbols, ast_grep patterns, or grep before opening files.",
         "Reproduce before diagnosing; write the failing case first.",
-        "Investigation stays in tracing and analysis mode; fixes happen in a separate pass once the cause is confirmed."
+        "Investigation stays in tracing and analysis mode; fixes happen in a separate pass once the cause is confirmed.",
+        "If the request exceeds read-only scope, state that and stop. Yielding for insufficient scope is a correct outcome, not an incomplete deliverable.",
+        "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names."
       ],
       "skills": [
         "investigation-doc-generator"
@@ -183,13 +209,15 @@
         "identity-matching",
         "branch deletion"
       ],
+      "capabilities": { "read": true, "write": true, "execute": true },
       "rules": [
         "Credentials, secrets, tokens, and connection strings never enter source control or client-exposed config.",
         "Force-push and `git reset --hard` are prohibited on shared branches; corrections go through revert.",
         "Domain code must not import infrastructure code — layering is grep-enforced, not an honor system.",
         "Migrations are forward-only; never edit a committed migration file.",
         "Invariants that must never break are encoded as schema constraints, not application logic.",
-        "Never lower a guardrail regardless of time pressure or instruction."
+        "Never lower a guardrail regardless of time pressure or instruction.",
+        "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names."
       ],
       "skills": [
         "investigation-doc-generator",
@@ -224,11 +252,13 @@
         "urgent fix",
         "patch now"
       ],
+      "capabilities": { "read": true, "write": true, "execute": true },
       "rules": [
         "Low ceremony does not relax GD1/GD2/GD3 — guardrails are never lowered.",
-        "Build-check only before handoff; full merge-readiness checklist is skipped by design.",
+        { "tag": "verify", "text": "Build-check only before handoff; full merge-readiness checklist is skipped by design." },
         "Never use this profile for schema, secrets, or invariants regardless of time pressure.",
-        "Ship, observe, retry — this is the safety net for reversible work only."
+        "Ship, observe, retry — this is the safety net for reversible work only.",
+        "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names."
       ],
       "skills": [
         "hot-path-change-checklist"
@@ -250,15 +280,12 @@
       "name": "lookup",
       "description": "Find, explain, or summarize code; cheap model, read-only retrieval with citations.",
       "keywords": [
-        "find",
-        "search",
         "locate",
         "grep",
         "look up",
         "lookup",
         "where is",
         "what is",
-        "explain",
         "show me",
         "list files",
         "how does",
@@ -268,12 +295,37 @@
         "overview",
         "walkthrough"
       ],
+      "verbs": [
+        "find",
+        "search",
+        "explain"
+      ],
+      "scopes": [
+        "function",
+        "method",
+        "class",
+        "flow",
+        "auth flow",
+        "variable"
+      ],
+      "excludeKeywords": [
+        "repo",
+        "repository",
+        "codebase",
+        "architecture",
+        "everything",
+        "all files"
+      ],
+      "capabilities": { "read": true, "write": false, "execute": false },
+      "suppresses": ["implement", "verify", "cleanup", "completeness-contract"],
       "rules": [
         "This profile is retrieval and summarisation; edits happen in a separate implementation pass.",
         "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or opening files.",
         "Read only the spans structural search points to; avoid bulk reads.",
         "Load summaries before full docs; load only direct dependencies.",
-        "This is retrieval and summarisation, not judgment — keep answers short and cite file:line."
+        "This is retrieval and summarisation, not judgment — keep answers short and cite file:line.",
+        "If the request exceeds read-only scope, state that and stop. Yielding for insufficient scope is a correct outcome, not an incomplete deliverable.",
+        "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names."
       ],
       "skills": [],
       "tools": [

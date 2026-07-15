@@ -298,6 +298,16 @@ test.
 
 ## (f) `session.compacting` — mid-run compaction rule re-injection (2026-07-13)
 
+> **SUPERSEDED / FALSIFIED (2026-07-15).** The premise below — that mid-run
+> compaction can drop the rules block and it must be re-injected — does not
+> hold. The merged rules ride in `systemPrompt` (a field separate from the
+> message array), which is re-sent on every model call and is never touched by
+> compaction; `"system"` is not even a message role. Re-injection is
+> unnecessary. **Do not re-prioritize this as open work.** The mechanism notes
+> below remain accurate as an API reference only. (The `session.compacting`
+> handler shipped in DECISIONS Phase 10 is now believed redundant; left in
+> place pending a decision to remove it.)
+
 **Finding: the event name really does use a dot (`session.compacting`), not
 an underscore**, unlike every other event name used elsewhere in this
 extension (`before_agent_start`, `tool_call`). Confirmed at the registration
