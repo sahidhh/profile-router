@@ -315,13 +315,13 @@
         "class",
         "flow",
         "auth flow",
-        "variable"
-      ],
-      "excludeKeywords": [
+        "variable",
         "repo",
         "repository",
         "codebase",
-        "architecture",
+        "project"
+      ],
+      "excludeKeywords": [
         "everything",
         "all files"
       ],

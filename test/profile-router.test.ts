@@ -551,14 +551,16 @@ describe("bundles.json reachability", () => {
     }
   });
 
-  // "repo"-scoped summarization moved from lookup to investigation under the two-axis
-  // scoring surgery (T01-03): lookup.excludeKeywords now disqualifies any "repo"/
-  // "repository"/"codebase" prompt (too broad for the cheap, single-file lookup
-  // profile), while investigation.scopes gained "repo" as a breadth signal.
-  test("whole-repo summarization routes to investigation, not lookup", () => {
+  // SUPERSEDES 0b233c2 / b021cbe, which routed "repo"-scoped prompts to investigation by
+  // putting "repo"/"repository"/"codebase" in lookup.excludeKeywords. That exclusion vetoed
+  // the orientation verb before it could score, so "summarize what this repo does" — a
+  // read-only orientation question — landed on the investigation profile. Orientation over a
+  // whole repo is still retrieval, not root-causing: "repo" is now a lookup scope, and only
+  // genuinely exhaustive signals ("everything", "all files") disqualify lookup.
+  test("whole-repo summarization routes to lookup, not investigation", () => {
     const hits = classify("summarize what this repo does", realBundles);
     assert.ok(hits.length > 0);
-    assert.equal(hits[0]?.profile.name, "investigation");
+    assert.equal(hits[0]?.profile.name, "lookup");
   });
 
   test("every code-exploring profile carries the lsp and ast_grep tools", () => {
@@ -1806,17 +1808,22 @@ describe("golden: prod-failure regression lock", () => {
   const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
   const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
 
-  test('golden #1: "explain this repo - optimal scan use micro sub-agents or tools" -> investigation', () => {
+  // Goldens #1/#2 REVERSED, superseding 0b233c2 ("scope-heavy prompts scored as lookup on a
+  // lone verb") and b021cbe, which pinned these prompts to investigation. That direction is no
+  // longer the intended one: "explain this repo" is an orientation question, and orientation is
+  // lookup's job (retrieval, not judgment). The exclusion that forced investigation also fired
+  // before the verb could score, which is the misroute this reversal fixes.
+  test('golden #1: "explain this repo - optimal scan use micro sub-agents or tools" -> lookup', () => {
     const hits = classify("explain this repo - optimal scan use micro sub-agents or tools", realBundles);
-    assert.equal(hits[0]?.profile.name, "investigation");
+    assert.equal(hits[0]?.profile.name, "lookup");
   });
 
-  test('golden #2: "ok, go on" as turn 2 after golden #1 -> investigation, inherited via stickiness', () => {
+  test('golden #2: "ok, go on" as turn 2 after golden #1 -> lookup, inherited via stickiness', () => {
     const first = classify("explain this repo - optimal scan use micro sub-agents or tools", realBundles);
-    assert.equal(first[0]?.profile.name, "investigation");
+    assert.equal(first[0]?.profile.name, "lookup");
 
     const second = classify("ok, go on", realBundles, first[0]!.profile.name);
-    assert.equal(second[0]?.profile.name, "investigation");
+    assert.equal(second[0]?.profile.name, "lookup");
     assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
   });
 
@@ -1865,6 +1872,33 @@ describe("golden: prod-failure regression lock", () => {
       assert.ok(!resolved.rules.includes(text), `co-matched resolved rules must not contain suppressed rule: "${text}"`);
     }
   });
+});
+
+// ---------- Repo-scope routing: orientation prompts route to lookup ----------
+
+describe("repo-scope routing: orientation -> lookup, escalation -> investigation", () => {
+  const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+  const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+
+  const cases: { prompt: string; expected: string; note: string }[] = [
+    { prompt: "explain this repo", expected: "lookup", note: "the bug: 'repo' vetoed lookup before 'explain' could score" },
+    { prompt: "overview of the codebase", expected: "lookup", note: "orientation vocabulary + breadth scope" },
+    { prompt: "summarize the project", expected: "lookup", note: "orientation vocabulary + breadth scope" },
+    { prompt: "read every file in the repo", expected: "investigation", note: "exhaustive-scan escalation" },
+    { prompt: "root cause the crash in the repo", expected: "investigation", note: "investigation verb outranks the shared scope" },
+    { prompt: "explain the auth flow", expected: "lookup", note: "regression guard: narrow-scope lookup unchanged" },
+  ];
+
+  for (const { prompt, expected, note } of cases) {
+    test(`"${prompt}" -> ${expected} (${note})`, () => {
+      const hits = classify(prompt, realBundles);
+      const trace = explain(prompt, realBundles)
+        .map((r) => `  ${r.name} (order ${r.order}): score=${r.score} matched=[${r.matched.join(", ")}]`)
+        .join("\n");
+      assert.ok(hits.length > 0, `expected a match for "${prompt}":\n${trace}`);
+      assert.equal(hits[0]?.profile.name, expected, `explain("${prompt}"):\n${trace}`);
+    });
+  }
 });
 
 describe("telemetry: routing decisions logged to .profile-router-telemetry.log", () => {
