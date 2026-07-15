@@ -619,7 +619,7 @@ export default function (pi: ExtensionAPI) {
     return {
       context: [
         `## Active Engineering Rules (${active.matched.map((m) => m.name).join("+") || "default"})\n` +
-          active.rules.map((r) => `- ${r}`).join("\n"),
+        active.rules.map((r) => `- ${r}`).join("\n"),
       ],
     };
   });
@@ -648,7 +648,7 @@ export default function (pi: ExtensionAPI) {
     if (cfg.rules.length > 0) {
       parts.push(
         `## Active Engineering Rules (${cfg.matched.map((m) => m.name).join("+") || "default"})\n` +
-          cfg.rules.map((r) => `- ${r}`).join("\n"),
+        cfg.rules.map((r) => `- ${r}`).join("\n"),
       );
     }
     if (cfg.skills.length > 0) {
@@ -875,7 +875,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(
         (active
           ? `Active: ${active.matched.map((m) => `${m.name}(${m.score})`).join(", ") || "default"}\n` +
-              `Model: ${modelStr(active.model)} | Thinking: ${active.thinkingLevel ?? "unset"} | Disabled agents: ${active.disabledAgents.join(", ") || "none"}`
+          `Model: ${modelStr(active.model)} | Thinking: ${active.thinkingLevel ?? "unset"} | Disabled agents: ${active.disabledAgents.join(", ") || "none"}`
           : "No classification yet — send a prompt first") + pendingNote,
         "info",
       );

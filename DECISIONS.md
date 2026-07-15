@@ -583,3 +583,26 @@ D-F1. **Profile-driven `<skills>` filtering (verify before building).** The
     that observed fact, not the inference. If never scheduled, the inference
     stays as-is: harmless, no cost. (Currently a no-op here anyway — `lookup`
     ships `skills: []`; see BLOCKERS / T06b.)
+
+D-F2. **lookup+investigation co-match blends two read-only profiles** (2026-07-15).
+Observed live: "explain this repo" scores lookup 3 [explain, repo] over
+investigation 2 [repo]. lookup wins and picks the model correctly (gemini-flash-lite),
+BUT investigation also clears minScore (bare scope "repo" = weight 2 ≥ 1), so both
+profiles co-match and merge() unions them. Two consequences, both currently harmless:
+  1. RULES: investigation's rules (reproduce-first, root-cause, trace) union into a
+     cheap orientation lookup. Tonal noise, not a capability conflict — both are read-only.
+  2. disabledAgents (INTERSECTION): lookup disables "task", investigation does NOT.
+     Intersection of {task} and {} = {} → lookup's sub-agent ban is silently lifted
+     by the co-match. Did not manifest on a 1-file test repo; could on a large repo
+     where a "cheap lookup" fans out sub-agents lookup was designed to forbid.
+Root cause: "repo"/"repository"/"codebase"/"project" are scopes in BOTH lookup and
+investigation, so orientation prompts co-match investigation by design.
+NOT the same as Phase 9 (T2): that fix reworded read-only RULE language for
+readonly-vs-write co-match. This is readonly-vs-readonly, and the real leak is
+disabledAgents intersection, not rule wording — T2 does not touch it.
+Gate before fixing: accumulate real routes via the deployed telemetry
+(.profile-router-telemetry.log, live as of this file) for ~1 week. Then:
+  - if repo-class co-matches are RARE → one-line fix: investigation minScore: 3
+    (a lone scope word can't elect it; needs a real verb too).
+  - if COMMON → do the verbs/scopes split properly (the deferred schema work).
+Do NOT fix by adding suppressions — the leak is agent-disabling, not rules.
