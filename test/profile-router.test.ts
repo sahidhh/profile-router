@@ -201,6 +201,69 @@ describe("merge", () => {
     assert.deepEqual(cfg.rules, ["gamma-rule"]);
     assert.equal(cfg.model, "anthropic/claude-sonnet-5");
   });
+
+  // ---- Branch A rule suppression: union(rules) MINUS union(suppresses-by-tag) ----
+
+  test("tagged rule suppression: a co-matched profile's suppresses removes another profile's tagged rule", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({
+          name: "writer",
+          keywords: ["writer-kw"],
+          rules: ["untagged-shared", { tag: "verify", text: "must-run-tests" }, { tag: "implement", text: "must-write-code" }],
+        }),
+        profile({
+          name: "reader",
+          keywords: ["reader-kw"],
+          suppresses: ["verify", "implement"],
+          rules: ["reader-only-rule"],
+        }),
+      ],
+    };
+    const cfg = merge(
+      [{ profile: bundles.profiles[0]!, score: 1 }, { profile: bundles.profiles[1]!, score: 1 }],
+      bundles,
+    );
+    assert.deepEqual(
+      cfg.rules.sort(),
+      ["untagged-shared", "reader-only-rule"].sort(),
+      `expected tagged rules suppressed, untagged rules kept: ${cfg.rules.join(", ")}`,
+    );
+  });
+
+  test("tagged rule suppression is order-independent (destructive regardless of matched-array order)", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({ name: "writer", keywords: ["writer-kw"], rules: [{ tag: "cleanup", text: "must-cleanup" }] }),
+        profile({ name: "reader", keywords: ["reader-kw"], suppresses: ["cleanup"], rules: [] }),
+      ],
+    };
+    const forward = merge([{ profile: bundles.profiles[0]!, score: 1 }, { profile: bundles.profiles[1]!, score: 1 }], bundles);
+    const reverse = merge([{ profile: bundles.profiles[1]!, score: 1 }, { profile: bundles.profiles[0]!, score: 1 }], bundles);
+    assert.deepEqual(forward.rules, []);
+    assert.deepEqual(reverse.rules, []);
+  });
+
+  test("a profile's own suppresses does not remove its own untagged or unrelated-tag rules", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({
+          name: "self",
+          keywords: ["self-kw"],
+          suppresses: ["verify"],
+          rules: ["plain-rule", { tag: "other-tag", text: "unaffected-tag-rule" }, { tag: "verify", text: "self-verify-rule" }],
+        }),
+      ],
+    };
+    const cfg = merge(classify("self-kw", bundles), bundles);
+    assert.deepEqual(cfg.rules.sort(), ["plain-rule", "unaffected-tag-rule"].sort());
+  });
+
+  test("legacy plain-string rules remain fully backward-compatible (never suppressed, unaffected by suppresses)", () => {
+    const matches = classify("shared-kw only", fixtureBundles); // alpha/beta/gamma, all plain-string rules, no suppresses
+    const cfg = merge(matches, fixtureBundles);
+    assert.deepEqual(cfg.rules.sort(), ["alpha-rule", "beta-rule", "gamma-rule"].sort());
+  });
 });
 
 // ---------- explain() ----------
@@ -451,10 +514,75 @@ describe("bundles.json reachability", () => {
     const cfg = merge(classified, realBundles);
     const rulesJoined = cfg.rules.join("\n");
 
-    // Assert no prohibition language exists in merged rules.
-    assert.ok(!/read-only/i.test(rulesJoined), `merged rules must not contain "read-only": ${rulesJoined}`);
+    // Assert no blanket edit-prohibition language exists in merged rules. Note: lookup's
+    // conditional escape-hatch rule ("If the request exceeds read-only scope, state that
+    // and stop...") legitimately mentions "read-only" — that is scoped guidance for lookup
+    // alone, not a ban that should block implementation's co-matched write mandate, so it's
+    // excluded from this check (see T04-06 "co-matching implementation and lookup" golden test).
+    assert.ok(!/is read-only/i.test(rulesJoined), `merged rules must not contain "is read-only": ${rulesJoined}`);
     assert.ok(!/do not (edit|write)/i.test(rulesJoined), `merged rules must not contain "do not edit/write": ${rulesJoined}`);
     assert.ok(!/no (code )?edits?/i.test(rulesJoined), `merged rules must not contain "no edits": ${rulesJoined}`);
+  });
+
+  const ESCAPE_HATCH =
+    "If the request exceeds read-only scope, state that and stop. Yielding for insufficient scope is a correct outcome, not an incomplete deliverable.";
+  const SUPPRESSIBLE_TAGS = ["implement", "verify", "cleanup", "completeness-contract"];
+
+  // Extracts the {tag,text} rule entries actually declared for a profile, ignoring plain strings.
+  const taggedRuleTexts = (p: Profile, tags: string[]): string[] =>
+    (p.rules ?? [])
+      .filter((r): r is { tag: string; text: string } => typeof r !== "string" && tags.includes(r.tag))
+      .map((r) => r.text);
+
+  test("T04-06 invariant: every capabilities.write===false profile resolves with no implement/verify/cleanup/completeness-contract rule, alone or co-matched with implementation", () => {
+    const implementationProfile = realBundles.profiles.find((p) => p.name === "implementation")!;
+    assert.ok(implementationProfile, "fixture must declare an implementation profile");
+
+    const writeFalseProfiles = realBundles.profiles.filter((p) => p.capabilities?.write === false);
+    assert.ok(writeFalseProfiles.length > 0, "expected at least one write:false profile in bundles.json");
+
+    for (const p of writeFalseProfiles) {
+      for (const matches of [
+        [{ profile: p, score: 5 }],
+        [{ profile: p, score: 5 }, { profile: implementationProfile, score: 5 }],
+      ]) {
+        const cfg = merge(matches, realBundles);
+        for (const tag of SUPPRESSIBLE_TAGS) {
+          const banned = taggedRuleTexts(implementationProfile, [tag]);
+          for (const text of banned) {
+            assert.ok(
+              !cfg.rules.includes(text),
+              `profile "${p.name}" (co-matched: ${matches.map((m) => m.profile.name).join("+")}) must not carry implementation's "${tag}"-tagged rule: "${text}"`,
+            );
+          }
+        }
+      }
+    }
+  });
+
+  test("T06 golden: lookup's escape-hatch rule survives suppression, alone and co-matched with implementation", () => {
+    const lookupProfile = realBundles.profiles.find((p) => p.name === "lookup")!;
+    const implementationProfile = realBundles.profiles.find((p) => p.name === "implementation")!;
+    assert.equal(lookupProfile.capabilities?.write, false, "lookup must be capabilities.write===false");
+    assert.deepEqual(lookupProfile.suppresses?.slice().sort(), SUPPRESSIBLE_TAGS.slice().sort());
+
+    const alone = merge([{ profile: lookupProfile, score: 5 }], realBundles);
+    assert.ok(alone.rules.includes(ESCAPE_HATCH), `lookup alone must include the escape-hatch rule: ${alone.rules.join("\n")}`);
+
+    const coMatched = merge(
+      [{ profile: lookupProfile, score: 5 }, { profile: implementationProfile, score: 5 }],
+      realBundles,
+    );
+    assert.ok(
+      coMatched.rules.includes(ESCAPE_HATCH),
+      `lookup co-matched with implementation must still include the escape-hatch rule: ${coMatched.rules.join("\n")}`,
+    );
+    // And the write mandates implementation carries must be gone from the resolved set.
+    for (const tag of ["implement", "verify", "cleanup"]) {
+      for (const text of taggedRuleTexts(implementationProfile, [tag])) {
+        assert.ok(!coMatched.rules.includes(text), `co-matched rules must not contain implementation's "${tag}" rule: "${text}"`);
+      }
+    }
   });
 });
 

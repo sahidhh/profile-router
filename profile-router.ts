@@ -23,6 +23,11 @@ import * as crypto from "node:crypto";
 
 // ---------- Types (mirror bundles.json schema) ----------
 
+// A rule is either a plain string (untagged; always survives suppression) or a
+// tagged entry { tag, text } that a co-matched profile's `suppresses` list can remove
+// at merge time (Branch A: destructive, order-independent negation).
+export type RuleEntry = string | { tag: string; text: string };
+
 export interface Profile {
   name: string;
   description?: string;         // one-line human summary (display only; never affects classification)
@@ -31,7 +36,9 @@ export interface Profile {
   scopes?: string[];            // code-element / breadth nouns (e.g. "function", "repository"); weight 2
   excludeKeywords?: string[];   // ANY hit disqualifies the profile (score = -Infinity)
   minScore?: number;            // qualifying threshold for this profile; default 1 (preserves legacy score>0 routing)
-  rules?: string[];            // injected into system prompt
+  capabilities?: { read?: boolean; write?: boolean; execute?: boolean }; // declarative; drives suppression/escape-hatch conventions, not enforced by merge() itself
+  suppresses?: string[];        // rule tags this profile removes from the merged set (union across all matched profiles)
+  rules?: RuleEntry[];          // injected into system prompt; union by text, then tagged entries filtered by suppresses
   skills?: string[];           // union
   tools?: string[];            // union
   disabledAgents?: string[];   // INTERSECTION across matched profiles
@@ -234,6 +241,32 @@ export function explain(
 
 // ---------- Merge (union / intersection / highest-score) ----------
 
+const ruleText = (r: RuleEntry): string => (typeof r === "string" ? r : r.text);
+const ruleTag = (r: RuleEntry): string | undefined => (typeof r === "string" ? undefined : r.tag);
+
+/**
+ * Union RuleEntry lists (dedup by text, first occurrence wins declaration order),
+ * then drop any tagged entry whose tag is in `kill`. Untagged (plain string) rules
+ * are never suppressed. Returns plain text for system-prompt injection.
+ */
+function resolveRules(ruleLists: (RuleEntry[] | undefined)[], kill: Set<string>): string[] {
+  const seen = new Set<string>();
+  const merged: RuleEntry[] = [];
+  for (const list of ruleLists) {
+    for (const r of list ?? []) {
+      const key = ruleText(r);
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(r);
+      }
+    }
+  }
+  return merged.filter((r) => {
+    const tag = ruleTag(r);
+    return tag === undefined || !kill.has(tag);
+  }).map(ruleText);
+}
+
 export function merge(matches: { profile: Profile; score: number }[], bundles: Bundles): MergedConfig {
   const cfg: MergedConfig = {
     matched: matches.map((m) => ({ name: m.profile.name, score: m.score })),
@@ -250,7 +283,7 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
   if (matches.length === 0) {
     // Fallback to default profile when nothing matched.
     if (bundles.default) {
-      union(cfg.rules, bundles.default.rules);
+      cfg.rules = resolveRules([bundles.default.rules], new Set());
       union(cfg.skills, bundles.default.skills);
       union(cfg.tools, bundles.default.tools);
       cfg.disabledAgents = bundles.default.disabledAgents ?? [];
@@ -260,11 +293,17 @@ export function merge(matches: { profile: Profile; score: number }[], bundles: B
     return cfg;
   }
 
+  // Rule suppression (Branch A): union all matched profiles' rules by text, union all
+  // matched profiles' `suppresses` tags, then drop any tagged rule whose tag is killed.
+  // Destructive and order-independent — a suppressing co-match always wins over union.
+  const kill = new Set<string>();
+  for (const { profile } of matches) for (const tag of profile.suppresses ?? []) kill.add(tag);
+  cfg.rules = resolveRules(matches.map((m) => m.profile.rules), kill);
+
   // disabledAgents: intersection — any matched profile that leaves an agent
   // enabled keeps it enabled overall.
   let disabled: Set<string> | null = null;
   for (const { profile } of matches) {
-    union(cfg.rules, profile.rules);
     union(cfg.skills, profile.skills);
     union(cfg.tools, profile.tools);
     const d = new Set(profile.disabledAgents ?? []);
@@ -313,6 +352,28 @@ export function validateBundles(bundles: Bundles): string[] {
       !(typeof p.model === "string" || (Array.isArray(p.model) && p.model.every((m) => typeof m === "string")))
     ) {
       problems.push(`${label}: "model" must be a string or an array of strings`);
+    }
+    if (p.rules !== undefined) {
+      if (!Array.isArray(p.rules)) {
+        problems.push(`${label}: "rules" must be an array`);
+      } else {
+        p.rules.forEach((r, ri) => {
+          const ok =
+            typeof r === "string" ||
+            (typeof r === "object" && r !== null && typeof (r as { tag?: unknown }).tag === "string" && typeof (r as { text?: unknown }).text === "string");
+          if (!ok) problems.push(`${label}: rules[${ri}] must be a string or {tag, text}`);
+        });
+      }
+    }
+    if (p.suppresses !== undefined && !(Array.isArray(p.suppresses) && p.suppresses.every((s) => typeof s === "string"))) {
+      problems.push(`${label}: "suppresses" must be an array of strings`);
+    }
+    if (p.capabilities !== undefined) {
+      const c = p.capabilities as Record<string, unknown>;
+      const badKey = Object.keys(c).find((k) => !["read", "write", "execute"].includes(k) || typeof c[k] !== "boolean");
+      if (typeof c !== "object" || c === null || badKey !== undefined) {
+        problems.push(`${label}: "capabilities" must be an object of {read?, write?, execute?: boolean}`);
+      }
     }
   });
 
