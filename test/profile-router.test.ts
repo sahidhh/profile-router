@@ -845,6 +845,7 @@ async function installExtension(dir: string) {
   const commands: Record<string, { handler: (args: string, ctx: unknown) => unknown }> = {};
   const notifications: { msg: string; level: string }[] = [];
   const setModelCalls: unknown[] = [];
+  const setActiveToolsCalls: string[][] = [];
 
   const fakePi = {
     on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
@@ -858,7 +859,10 @@ async function installExtension(dir: string) {
       return true;
     },
     setThinkingLevel: () => {},
-    setActiveTools: async () => {},
+    getActiveTools: () => ["read", "grep", "glob", "edit", "write", "bash"],
+    setActiveTools: async (tools: string[]) => {
+      setActiveToolsCalls.push(tools);
+    },
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
   };
   await mod.default(fakePi as never);
@@ -877,7 +881,7 @@ async function installExtension(dir: string) {
     model: undefined,
   };
 
-  return { handlers, commands, notifications, statuses, setModelCalls, ctx };
+  return { handlers, commands, notifications, statuses, setModelCalls, setActiveToolsCalls, ctx };
 }
 
 describe("F2 regression: stale /profile override never mislabels an auto-classified profile as manual", () => {
@@ -2128,6 +2132,35 @@ describe("telemetry: routing decisions logged to .profile-router-telemetry.log",
       assert.equal(logEntry.chosenProfile, "quiet", "pinned profile is the chosen one");
       assert.equal(logEntry.runnerUpProfile, "loud", "runner-up must be the best-scoring OTHER profile");
       assert.equal(logEntry.margin, -2, "margin = chosen score (0) - top other score (2)");
+    });
+  });
+});
+
+describe("toolset restore: a profile restriction never outlives its matching turns", () => {
+  test("restricted profile -> no-match turn restores the pre-restriction baseline exactly once", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "narrow", keywords: ["narrow-kw"], tools: ["read", "grep"] })],
+      });
+      const { handlers, setActiveToolsCalls, statuses, ctx } = await installExtension(dir);
+
+      await handlers["before_agent_start"]!({ prompt: "narrow-kw please look around", systemPrompt: [] }, ctx);
+      assert.deepEqual(setActiveToolsCalls[0], ["read", "grep"], "restriction applied");
+      assert.equal(statuses["profile"], "⚙ narrow 🔒", "status line marks the restricted toolset");
+
+      // No-match prompt (>=6 tokens so stickiness cannot inherit): baseline restored.
+      await handlers["before_agent_start"]!({ prompt: "completely unrelated wording spanning many many tokens", systemPrompt: [] }, ctx);
+      assert.equal(setActiveToolsCalls.length, 2, "restore fires once");
+      assert.deepEqual(
+        setActiveToolsCalls[1],
+        ["read", "grep", "glob", "edit", "write", "bash"],
+        "baseline captured before the restriction is what gets restored",
+      );
+      assert.equal(statuses["profile"], "⚙ default", "no lock marker once restored");
+
+      // A second unrestricted turn must not call setActiveTools again.
+      await handlers["before_agent_start"]!({ prompt: "another unrelated wording spanning many many tokens", systemPrompt: [] }, ctx);
+      assert.equal(setActiveToolsCalls.length, 2, "no redundant restore on already-unrestricted turns");
     });
   });
 });

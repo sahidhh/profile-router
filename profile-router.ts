@@ -413,6 +413,7 @@ export default function (pi: ExtensionAPI) {
   let modelSwitchesDeclined = 0;
   let lastConfigHash: string | null = null;       // content hash from the most recent bundles.json load this session
   let stickyPrevProfile: string | null = null;    // last active profile name, for stickiness inheritance; reset on explicit /profile pin/clear or new session
+  let baselineTools: string[] | null = null;      // toolset captured before the first profile restriction this session, restored on no-tools turns
 
   const debugLog = (msg: string, context?: Record<string, unknown>) => {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
@@ -536,11 +537,13 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Status line: ALWAYS visible so misclassification is caught before damage.
+    // 🔒 marks a restricted toolset — otherwise the restriction is invisible until
+    // a tool is missing mid-run.
     ctx.ui.setStatus(
       "profile",
-      next.matched.length
+      (next.matched.length
         ? `⚙ ${next.matched.map((m) => m.name).join("+")}${overrideApplied ? (overrideWasOnce ? " (manual, once)" : " (manual)") : ""}`
-        : "⚙ default",
+        : "⚙ default") + (next.tools.length > 0 ? " 🔒" : ""),
     );
 
     // ---- Model routing: suggest + confirm, only on actual change ----
@@ -595,11 +598,20 @@ export default function (pi: ExtensionAPI) {
       pi.setThinkingLevel(next.thinkingLevel as Parameters<typeof pi.setThinkingLevel>[0]);
     }
 
-    // ---- Active tools: only restrict when the merged profile set actually specifies a tool list.
-    // An empty union (default / no profile declares `tools`) leaves the current toolset untouched
-    // so a no-match prompt never silently strips bash/edit/write.
+    // ---- Active tools: restrict when the merged profile set specifies a tool list; restore
+    // the session baseline when it doesn't. Previously a restriction persisted into
+    // no-tools turns (a lookup-restricted toolset survived into an unrelated default prompt,
+    // silently leaving edit/write/bash missing). The baseline is captured immediately before
+    // the first restriction, so it reflects the session's real starting toolset.
+    // getActiveTools() verified on ExtensionAPI: dist/types/extensibility/extensions/types.d.ts:734.
     if (next.tools.length > 0) {
+      if (baselineTools === null && typeof pi.getActiveTools === "function") {
+        baselineTools = pi.getActiveTools();
+      }
       await pi.setActiveTools(next.tools);
+    } else if (baselineTools !== null) {
+      await pi.setActiveTools(baselineTools);
+      baselineTools = null;
     }
 
     // ---- Rules injection into system prompt for this agent run ----
