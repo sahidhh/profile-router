@@ -2090,6 +2090,22 @@ describe("telemetry: routing decisions logged to .profile-router-telemetry.log",
     });
   });
 
+  test("default (no-match) routes are logged with chosenProfile 'default'", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      await handlers["before_agent_start"]!({ prompt: "totally unrelated wording with many tokens here", systemPrompt: [] }, ctx);
+
+      const logEntry = JSON.parse(fs.readFileSync(logPath, "utf-8").trim());
+      assert.equal(logEntry.chosenProfile, "default", "no-match routes must be logged — they are the missing-vocabulary corpus");
+      assert.equal(logEntry.runnerUpProfile, "alpha", "runner-up is the best real profile even on default routes");
+    });
+  });
+
   test("manual pin: runner-up is the top OTHER scorer, never the chosen profile; margin may go negative", async () => {
     await withTempProjectDir(async (dir) => {
       writeBundles(dir, {
@@ -2112,6 +2128,45 @@ describe("telemetry: routing decisions logged to .profile-router-telemetry.log",
       assert.equal(logEntry.chosenProfile, "quiet", "pinned profile is the chosen one");
       assert.equal(logEntry.runnerUpProfile, "loud", "runner-up must be the best-scoring OTHER profile");
       assert.equal(logEntry.margin, -2, "margin = chosen score (0) - top other score (2)");
+    });
+  });
+});
+
+describe("/profile telemetry: routing-log summary", () => {
+  test("no log file -> 'No telemetry recorded yet'", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })] });
+      const { commands, notifications, ctx } = await installExtension(dir);
+      await commands["profile"]!.handler("telemetry", ctx);
+      assert.ok(
+        notifications.some((n) => /No telemetry recorded yet/.test(n.msg)),
+        `expected missing-log notice, got: ${notifications.map((n) => n.msg).join(" | ")}`,
+      );
+    });
+  });
+
+  test("summarizes per-profile counts, default routes, and low-margin routes", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["alpha-kw", "alpha-two"] }),
+          profile({ name: "beta", keywords: ["beta-kw"] }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw alpha-two content", systemPrompt: [] }, ctx); // alpha, margin 2
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw beta-kw mixed", systemPrompt: [] }, ctx);      // alpha, margin 0 (low)
+      await handlers["before_agent_start"]!({ prompt: "nothing matches this wording at all", systemPrompt: [] }, ctx); // default
+
+      await commands["profile"]!.handler("telemetry", ctx);
+      const summary = notifications.map((n) => n.msg).find((m) => /^Telemetry \(/.test(m));
+      assert.ok(summary, `expected a telemetry summary, got: ${notifications.map((n) => n.msg).join(" | ")}`);
+      assert.ok(/Telemetry \(3 routes/.test(summary!), `route count wrong: ${summary}`);
+      assert.ok(/alpha: 2/.test(summary!), `alpha count wrong: ${summary}`);
+      assert.ok(/default: 1/.test(summary!), `default count wrong: ${summary}`);
+      assert.ok(/1 default route — prompts the vocabulary missed/.test(summary!), `default callout missing: ${summary}`);
+      assert.ok(/Low-margin routes \(margin <= 1\): 2/.test(summary!), `low-margin count wrong: ${summary}`);
     });
   });
 });

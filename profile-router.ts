@@ -518,10 +518,9 @@ export default function (pi: ExtensionAPI) {
 
     debugLog("classified", { prompt: event.prompt.slice(0, 80), matched: next.matched });
 
-    // ---- Telemetry: log every routing decision ----
-    if (next.matched.length > 0) {
-      logTelemetry(ctx.cwd, event.prompt, next.matched[0]!.name, explainRows());
-    }
+    // ---- Telemetry: log every routing decision, including default (no-match) routes.
+    // Default rows are the prompts the vocabulary missed — the highest-value tuning data.
+    logTelemetry(ctx.cwd, event.prompt, next.matched[0]?.name ?? "default", explainRows());
 
     // ---- Debug trace: explain WHY this prompt routed where it did (toggled via /profile debug) ----
     if (debugTrace) {
@@ -707,7 +706,7 @@ export default function (pi: ExtensionAPI) {
   // ---- Manual override + status ----
   pi.registerCommand("profile", {
     description:
-      "Status/override: /profile [<name> [--once]|clear] | list | debug [on|off] | validate | explain <text> | stats | rules | misroute [expected]",
+      "Status/override: /profile [<name> [--once]|clear] | list | debug [on|off] | validate | explain <text> | stats | rules | telemetry | misroute [expected]",
     handler: async (args, ctx) => {
       const arg = (args ?? "").trim();
       const [sub, ...rest] = arg.split(/\s+/);
@@ -819,6 +818,49 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         ctx.ui.notify(block, "info");
+        return;
+      }
+
+      // ---- /profile telemetry : summarize the routing log for vocabulary tuning ----
+      if (sub === "telemetry") {
+        const logPath = path.join(ctx.cwd, ".profile-router-telemetry.log");
+        if (!fs.existsSync(logPath)) {
+          ctx.ui.notify("No telemetry recorded yet (.profile-router-telemetry.log missing)", "info");
+          return;
+        }
+        type TelemetryRow = { prompt: string; chosenProfile: string; margin: number; runnerUpProfile: string | null };
+        const rows: TelemetryRow[] = [];
+        for (const line of fs.readFileSync(logPath, "utf-8").split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            rows.push(JSON.parse(trimmed) as TelemetryRow);
+          } catch {
+            // Skip corrupt lines — the log is append-only and may interleave across sessions.
+          }
+        }
+        if (rows.length === 0) {
+          ctx.ui.notify("Telemetry log exists but has no readable entries", "info");
+          return;
+        }
+        const counts = new Map<string, number>();
+        for (const r of rows) counts.set(r.chosenProfile, (counts.get(r.chosenProfile) ?? 0) + 1);
+        const lines: string[] = [`Telemetry (${rows.length} route${rows.length === 1 ? "" : "s"} in .profile-router-telemetry.log):`];
+        for (const [name, count] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
+          lines.push(`  ${name}: ${count}`);
+        }
+        const defaultCount = counts.get("default") ?? 0;
+        if (defaultCount > 0) {
+          lines.push(`${defaultCount} default route${defaultCount === 1 ? "" : "s"} — prompts the vocabulary missed; review them for new keywords`);
+        }
+        // Low-margin routes are the ones one stray keyword away from flipping profile.
+        const lowMargin = rows.filter((r) => typeof r.margin === "number" && r.margin <= 1);
+        lines.push(`Low-margin routes (margin <= 1): ${lowMargin.length}`);
+        for (const r of lowMargin.slice(-5)) {
+          const promptPreview = r.prompt.length > 60 ? `${r.prompt.slice(0, 60)}…` : r.prompt;
+          lines.push(`  [${r.margin >= 0 ? "+" : ""}${r.margin}] ${r.chosenProfile}${r.runnerUpProfile ? ` vs ${r.runnerUpProfile}` : ""}: "${promptPreview}"`);
+        }
+        ctx.ui.notify(lines.join("\n"), "info");
         return;
       }
 
