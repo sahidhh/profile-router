@@ -721,7 +721,7 @@ export default function (pi: ExtensionAPI) {
   // ---- Manual override + status ----
   pi.registerCommand("profile", {
     description:
-      "Status/override: /profile [<name>|clear] | list | debug [on|off] | validate | explain <text>",
+      "Status/override: /profile [<name> [--once]|clear] | list | debug [on|off] | validate | explain <text> | stats | rules | misroute [expected]",
     handler: async (args, ctx) => {
       const arg = (args ?? "").trim();
       const [sub, ...rest] = arg.split(/\s+/);
