@@ -170,29 +170,15 @@ export function scoreProfile(text: string, profile: Profile): { score: number; m
 }
 
 // Stickiness: a turn with no qualifying match inherits the previous turn's
-// profile when the new prompt is short (<6 tokens) or is a bare continuation
-// ("ok", "continue", ...) — i.e. it's plausibly still talking about the same
-// thing rather than starting a new topic.
-const CONTINUATION_PHRASES = new Set([
-  "ok",
-  "yes",
-  "go on",
-  "continue",
-  "next",
-  "and",
-  "more",
-  "keep going",
-  "do it",
-  "proceed",
-  "thanks",
-  "now fix it",
-]);
-
+// profile when the new prompt is short (<6 tokens) — i.e. it's plausibly a bare
+// continuation ("ok", "continue", "now fix it", ...) still talking about the
+// same thing rather than starting a new topic. Every known continuation phrase
+// is under 6 tokens, so the token threshold alone covers them; a phrase list
+// would only matter for continuations of 6+ tokens, which don't exist.
 function isStickyContinuation(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length === 0) return false;
-  const tokenCount = trimmed.split(/\s+/).length;
-  return tokenCount < 6 || CONTINUATION_PHRASES.has(trimmed);
+  return trimmed.split(/\s+/).length < 6;
 }
 
 export function classify(
