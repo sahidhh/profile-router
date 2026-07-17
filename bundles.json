@@ -8,7 +8,7 @@
     "thinkingLevel": "medium",
     "rules": [
       "A change is not handed off until build/test reports clean.",
-      "Investigation is search-first: locate via lsp symbols, ast_grep patterns, or grep before opening files."
+      "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads."
     ],
     "commonRules": [
       "If a tool result is truncated or suspiciously narrow, NARROW THE QUERY and re-run. NEVER summarise from a truncated result. NEVER infer file contents from file names."
@@ -153,23 +153,21 @@
         "tracing",
         "reproduce",
         "bug report",
-        "diagnose"
+        "diagnose",
+        "crash",
+        "stack trace"
       ],
       "scopes": [
-        "repo",
-        "repository",
-        "codebase",
-        "architecture",
-        "project",
         "all files",
         "everything",
-        "explore"
+        "explore",
+        "every file"
       ],
       "capabilities": { "read": true, "write": false, "execute": true },
       "suppresses": ["implement", "verify", "cleanup", "completeness-contract"],
       "rules": [
         "A fix is not approved until its root cause is identified; symptom patches are rejected.",
-        "Search-first, read-restrained: locate via lsp symbols, ast_grep patterns, or grep before opening files.",
+        "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads.",
         "Reproduce before diagnosing; write the failing case first.",
         { "tag": "readonly-scope", "text": "Investigation stays in tracing and analysis mode; fixes happen in a separate pass once the cause is confirmed." },
         "If the request exceeds read-only scope, state that and stop. Yielding for insufficient scope is a correct outcome, not an incomplete deliverable."
@@ -323,13 +321,15 @@
       ],
       "excludeKeywords": [
         "everything",
-        "all files"
+        "all files",
+        "explore",
+        "every file"
       ],
       "capabilities": { "read": true, "write": false, "execute": false },
       "suppresses": ["implement", "verify", "cleanup", "completeness-contract"],
       "rules": [
         { "tag": "readonly-scope", "text": "This profile is retrieval and summarisation; edits happen in a separate implementation pass." },
-        "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or opening files.",
+        "Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns, before falling back to plain grep or bulk reads.",
         "Read only the spans structural search points to; avoid bulk reads.",
         "Load summaries before full docs; load only direct dependencies.",
         "This is retrieval and summarisation, not judgment — keep answers short and cite file:line.",

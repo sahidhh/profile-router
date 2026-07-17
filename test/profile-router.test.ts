@@ -1767,7 +1767,7 @@ describe("T01-03: two-axis scoring routing", () => {
   const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
   const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
 
-  test('"explore and explain this repository" -> investigation (lookup disqualified by excludeKeywords "repository")', () => {
+  test('"explore and explain this repository" -> investigation (lookup disqualified by excludeKeywords "explore")', () => {
     const hits = classify("explore and explain this repository", realBundles);
     assert.equal(hits[0]?.profile.name, "investigation");
   });
@@ -1782,9 +1782,14 @@ describe("T01-03: two-axis scoring routing", () => {
     assert.equal(hits[0]?.profile.name, "lookup");
   });
 
-  test('"what does this repo do" -> investigation ("repo" scope; lookup disqualified by excludeKeywords)', () => {
+  // D-F2 resolution flipped this expectation: "what does this repo do" is an orientation
+  // question (repo-scope routing doctrine: orientation -> lookup). It previously landed on
+  // investigation only via the score-2 tie-break on the shared "repo" breadth scope, which
+  // also silently lifted lookup's sub-agent ban through disabledAgents intersection.
+  test('"what does this repo do" -> lookup (orientation; investigation no longer scores on bare breadth nouns)', () => {
     const hits = classify("what does this repo do", realBundles);
-    assert.equal(hits[0]?.profile.name, "investigation");
+    assert.equal(hits[0]?.profile.name, "lookup");
+    assert.ok(!hits.some((h) => h.profile.name === "investigation"), "investigation must not co-match on a bare breadth noun");
   });
 
   test('"fix the failing test" -> implementation ("failing test" keyword)', () => {
@@ -1921,6 +1926,48 @@ describe("golden: prod-failure regression lock", () => {
 
 // ---------- Repo-scope routing: orientation prompts route to lookup ----------
 
+// ---------- D-F2 resolution: orientation prompts must not co-match investigation ----------
+// The leak (DECISIONS.md D-F2, observed live in a production system prompt): lookup and
+// investigation both scored on breadth nouns ("repo"/"repository"/"codebase"/"project"), so an
+// orientation prompt co-matched both. disabledAgents intersection ({task} ∩ {} = {}) then
+// silently lifted lookup's sub-agent ban, and investigation's reproduce/root-cause rules
+// unioned into a cheap flash-lite lookup run.
+describe("D-F2: orientation prompts match lookup ALONE; sub-agent ban survives", () => {
+  const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+  const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+
+  for (const prompt of [
+    "explain this repo",
+    "explain this repo - optimal scan use micro sub-agents or tools",
+    "overview of the codebase",
+    "summarize the project",
+  ]) {
+    test(`"${prompt}" -> lookup only, task ban intact, no investigation rules`, () => {
+      const hits = classify(prompt, realBundles);
+      assert.equal(hits[0]?.profile.name, "lookup");
+      assert.ok(
+        !hits.some((h) => h.profile.name === "investigation"),
+        `investigation must not co-match an orientation prompt (hits: ${hits.map((h) => `${h.profile.name}:${h.score}`).join(", ")})`,
+      );
+      const merged = merge(hits, realBundles);
+      assert.ok(merged.disabledAgents.includes("task"), "lookup's sub-agent ban must survive the merge");
+      assert.ok(
+        !merged.rules.some((r) => /reproduce before diagnosing/i.test(r)),
+        "investigation's reproduce-first rule must not leak into a lookup run",
+      );
+    });
+  }
+
+  test("exploration rule appears exactly once when profiles co-match (canonical wording shared)", () => {
+    // lookup + implementation co-match (golden #5's scenario): both declare the exploration
+    // rule; identical wording means dedup-by-text collapses it to one injected line.
+    const hits = classify("implement the feature and explain how the auth flow works", realBundles);
+    const merged = merge(hits, realBundles);
+    const exploreRules = merged.rules.filter((r) => /^Explore structurally:/.test(r));
+    assert.ok(exploreRules.length <= 1, `expected at most one exploration rule, got: ${exploreRules.join(" | ")}`);
+  });
+});
+
 describe("repo-scope routing: orientation -> lookup, escalation -> investigation", () => {
   const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
   const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
@@ -1930,7 +1977,7 @@ describe("repo-scope routing: orientation -> lookup, escalation -> investigation
     { prompt: "overview of the codebase", expected: "lookup", note: "orientation vocabulary + breadth scope" },
     { prompt: "summarize the project", expected: "lookup", note: "orientation vocabulary + breadth scope" },
     { prompt: "read every file in the repo", expected: "investigation", note: "exhaustive-scan escalation" },
-    { prompt: "root cause the crash in the repo", expected: "investigation", note: "investigation verb outranks the shared scope" },
+    { prompt: "root cause the crash in the repo", expected: "investigation", note: "root cause + crash (score 2) ties lookup's repo scope; declaration order favors investigation" },
     { prompt: "explain the auth flow", expected: "lookup", note: "regression guard: narrow-scope lookup unchanged" },
   ];
 
