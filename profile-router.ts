@@ -73,45 +73,39 @@ const DEBUG = process.env.PROFILE_ROUTER_DEBUG === "1";
 /** Tracks whether we've already warned about a malformed/missing config this process, per path. */
 const warnedPaths = new Set<string>();
 
-export function loadBundles(cwd: string, notify?: (msg: string) => void): Bundles {
+/**
+ * Load the first-existing bundles.json candidate AND its content hash (sha256,
+ * first 12 hex chars) from a single disk read, so the change-notice hash and the
+ * applied config can never come from two different file states.
+ * hash is null when no file exists or the read itself fails; a file that reads
+ * but fails to parse still hashes (the change notice should fire on a bad edit).
+ */
+export function loadBundlesWithHash(cwd: string, notify?: (msg: string) => void): { bundles: Bundles; hash: string | null } {
   const candidates = [path.join(cwd, ".omp", "bundles.json"), path.join(os.homedir(), ".omp", "bundles.json")];
   for (const p of candidates) {
     if (!fs.existsSync(p)) continue;
+    let hash: string | null = null;
     try {
       const raw = fs.readFileSync(p, "utf-8");
+      hash = crypto.createHash("sha256").update(raw).digest("hex").slice(0, 12);
       const parsed = JSON.parse(raw) as Bundles;
       if (!parsed || !Array.isArray(parsed.profiles)) {
         throw new Error("bundles.json must have a top-level \"profiles\" array");
       }
-      return parsed;
+      return { bundles: parsed, hash };
     } catch (err) {
       if (!warnedPaths.has(p)) {
         warnedPaths.add(p);
         notify?.(`profile-router: failed to parse ${p} (${(err as Error).message}) — continuing with no profiles`);
       }
-      return { profiles: [] };
+      return { bundles: { profiles: [] }, hash };
     }
   }
-  return { profiles: [] };
+  return { bundles: { profiles: [] }, hash: null };
 }
 
-/**
- * Compute a short content hash (sha256, first 12 hex chars) of the first-existing
- * bundles.json candidate without re-implementing config loading.
- * Returns null if no file is found or if a read error occurs.
- */
-function configContentHash(cwd: string): string | null {
-  const candidates = [path.join(cwd, ".omp", "bundles.json"), path.join(os.homedir(), ".omp", "bundles.json")];
-  for (const p of candidates) {
-    if (!fs.existsSync(p)) continue;
-    try {
-      const raw = fs.readFileSync(p, "utf-8");
-      return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 12);
-    } catch {
-      return null;
-    }
-  }
-  return null;
+export function loadBundles(cwd: string, notify?: (msg: string) => void): Bundles {
+  return loadBundlesWithHash(cwd, notify).bundles;
 }
 
 // ---------- Classification (keyword scoring, word-boundary matching) ----------
@@ -478,10 +472,14 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Every prompt: classify, merge, inject ----
   pi.on("before_agent_start", async (event, ctx) => {
-    const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+    const { bundles, hash: currentHash } = loadBundlesWithHash(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
     lastPrompt = event.prompt;
 
-    const currentHash = configContentHash(ctx.cwd);
+    // Telemetry and the debug trace both need the full explain() ranking; score
+    // the profile table at most once per prompt and share the rows.
+    let cachedExplainRows: ReturnType<typeof explain> | null = null;
+    const explainRows = () => (cachedExplainRows ??= explain(event.prompt, bundles));
+
     if (currentHash !== null) {
       if (lastConfigHash !== null && currentHash !== lastConfigHash) {
         ctx.ui.notify(`bundles.json changed (${currentHash}) — applied`, "info");
@@ -532,8 +530,7 @@ export default function (pi: ExtensionAPI) {
 
     // ---- Telemetry: log every routing decision ----
     if (next.matched.length > 0) {
-      const explain_rows = explain(event.prompt, bundles);
-      logTelemetry(ctx.cwd, event.prompt, next.matched[0]!.name, explain_rows);
+      logTelemetry(ctx.cwd, event.prompt, next.matched[0]!.name, explainRows());
     }
 
     // ---- Debug trace: explain WHY this prompt routed where it did (toggled via /profile debug) ----
@@ -544,8 +541,7 @@ export default function (pi: ExtensionAPI) {
       } else if (matches[0]?.inherited) {
         lines.push(`  → ${matches[0].profile.name} (inherited from prev turn)`);
       } else {
-        const rows = explain(event.prompt, bundles);
-        lines.push(...formatTraceLines(rows));
+        lines.push(...formatTraceLines(explainRows()));
       }
       ctx.ui.notify(lines.join("\n"), "info");
     }
