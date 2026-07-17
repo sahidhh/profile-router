@@ -246,22 +246,28 @@ On **every** prompt submission (`before_agent_start`):
    auto-classified profile happens to match.
 5. Fields are merged per the semantics above.
 6. **Status line** updates to `⚙ profile-a+profile-b` (or `⚙ default` on no
-   match; `(manual)` suffix when pinned).
+   match; `(manual)` suffix when pinned; a `🔒` suffix whenever the active
+   profile restricts the toolset — see step 8).
 7. **Model routing**: if the merged `model` resolves to a different model
    than the current session model, you get a one-tap confirm dialog
    (`ctx.ui.confirm`) naming the suggesting profile and the target model.
-   Your answer is remembered for that exact `(from → to)` model pair for
-   the rest of the session — you won't be asked again for the same switch.
-   If you decline, nothing changes. If the resolved model has no
-   credentials, you get a warning telling you to run `/model <spec>`
-   manually instead. If the profile's `model` string can't be resolved at
-   all (typo, provider not installed), you get a one-time warning per
-   session naming the profile and the bad model string, then the session
-   continues on the current model.
+   Your answer is remembered for that exact `(from → to)` model pair and
+   **persisted to `.omp/model-decisions.json`**, so you won't be asked
+   again for the same switch — not even in a new session. Declines persist
+   the same way (the switch is silently skipped). Delete the file (or the
+   specific key inside it) to be asked again. If you decline, nothing
+   changes. If the resolved model has no credentials, you get a warning
+   telling you to run `/model <spec>` manually instead. If the profile's
+   `model` string can't be resolved at all (typo, provider not installed),
+   you get a one-time warning per session naming the profile and the bad
+   model string, then the session continues on the current model.
 8. **Thinking level** and **active tools** are applied silently (no
-   confirm) — thinking level is a low-stakes generation parameter; the
-   active-tools update only happens when the merged `tools` list is
-   non-empty, so a no-match prompt never strips your toolset.
+   confirm) — thinking level is a low-stakes generation parameter. When
+   the merged `tools` list is non-empty the toolset is restricted to it
+   (and the status line shows `🔒`); the pre-restriction toolset is
+   captured once per session and **restored automatically** on the next
+   prompt whose merged config declares no tools, so a restriction never
+   outlives the profile that imposed it.
 9. **Rules injection**: if the merged `rules` (or `skills`) list is
    non-empty, a block is appended to the system prompt for that turn only:
    ```
@@ -278,6 +284,21 @@ On **every** prompt submission (`before_agent_start`):
     tool, if the invoked agent (`input.agent`, defaulting to `"task"`) is
     in the merged `disabledAgents` list, the call is blocked with a reason
     shown to the LLM (`{ block: true, reason: "..." }"`).
+11. **Telemetry**: every routing decision (including default/no-match
+    routes) appends one JSON line to `.profile-router-telemetry.log` in
+    the project directory: timestamp, the first 200 characters of the
+    prompt, chosen profile, confidence margin, and runner-up. Summarize it
+    with `/profile telemetry`. **Privacy note**: prompt text is stored in
+    plaintext and the file grows without bound; it is gitignored (via the
+    `*.log` rule), but delete it whenever you want the history gone.
+    `.omp/misroutes.jsonl` (written by `/profile misroute`) stores up to
+    500 characters per logged prompt and is gitignored explicitly.
+
+> **Steering, not enforcement.** Rules are prose in the system prompt,
+> `tools` restriction relies on the runtime honoring `setActiveTools`, and
+> agent blocking covers the `task` tool. These are cost/behavior steering
+> mechanisms — not a security boundary against a hostile model or prompt
+> injection.
 
 ---
 
@@ -310,14 +331,26 @@ On **every** prompt submission (`before_agent_start`):
   session-only flag never persists to disk. Distinct from the
   `PROFILE_ROUTER_DEBUG=1` env var, which logs to the host logger instead of
   the UI.
+- `/profile explain <text>` — stateless routing trace for the given prompt
+  text: per-profile scores, matched keywords, winner, and confidence margin —
+  without sending the prompt or changing any session state.
 - `/profile validate` — structural check of the loaded `bundles.json`:
   duplicate profile names, missing/empty `keywords`, unknown `thinkingLevel`,
-  and malformed `model`. Reports `✓ valid` or an itemized list of problems —
+  malformed `model`/`rules`/`suppresses`/`capabilities`, non-string entries in
+  any term list (which would crash classification at routing time), and
+  non-numeric `minScore`. Reports `✓ valid` or an itemized list of problems —
   no prompt needed.
+- `/profile stats` — session counters: prompts classified per profile
+  (including `default`), manual pins set, model switches accepted/declined.
 - `/profile rules` — prints the exact rules/skills block currently being injected
   into the system prompt for the active profile. Reuses the same injection logic
   as `before_agent_start`, so what you see is exactly what gets injected into
   each prompt.
+- `/profile telemetry` — summarizes `.profile-router-telemetry.log`:
+  per-profile route counts, how many prompts fell through to `default`
+  (missing-vocabulary candidates), and the low-margin routes (margin ≤ 1 —
+  one stray keyword away from flipping profile, shown with prompt preview
+  and runner-up). This is the data to consult before tuning keywords.
 - `/profile misroute [expected-profile]` — logs the last classified prompt
   (truncated to 500 chars), the profiles it matched, and (optionally) the
   profile you expected it to match, as a single JSON line appended to
