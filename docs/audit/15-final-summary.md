@@ -57,12 +57,16 @@ D-F1 verification, deliberate OMP bumps. Full details: `12-roadmap.md`.
 
 ## Scores (1–10, calibrated to project scope)
 
+Post-batch-2 rescore in parentheses (see `docs/changes/change-summary.md` batch 2 — D-F2
+resolved with live-sample evidence, toolset restore, telemetry read surface + default routes,
+persisted model decisions, CI hardening):
+
 | Dimension | Score | Rationale |
 |---|---|---|
-| Repository maturity | 8 | tests+CI+docs+decision log; minus validator gaps, no coverage metric |
-| Architecture | 8.5 | clean core/shell split; minus per-prompt duplication (fixed), toolset asymmetry |
-| Maintainability | 8 | evidence culture, strict TS; minus if-chain handler, 2000-line test file |
-| Developer experience | 8 | one-command gate, hot reload, schema autocomplete, scripted global install (ac10d57) |
-| User experience | 7.5 | status line + introspection suite; minus stale help (fixed), repeated confirms, write-only telemetry |
-| Cost efficiency | 9 | zero-cost classifier, tiered routing, fallback chains; minus co-match bloat (gated) |
+| Repository maturity | 8 (8.5) | validator hardened, CI matrix + npm ci; still no coverage metric |
+| Architecture | 8.5 (9) | per-prompt duplication fixed; toolset asymmetry resolved via verified getActiveTools; co-match leak closed |
+| Maintainability | 8 (8) | dead stickiness construct removed; if-chain handler grew one subcommand (dispatch-table refactor still pending) |
+| Developer experience | 8 (8.5) | scripted global install (ac10d57) + lockfile-exact CI + complete command docs |
+| User experience | 7.5 (8.5) | help complete, confirms persisted, telemetry readable, 🔒 restriction visibility |
+| Cost efficiency | 9 (9.5) | co-match rule bloat + sub-agent-ban leak fixed; default routes now feed vocabulary tuning; remaining headroom is data-driven keyword tuning |
 ```
