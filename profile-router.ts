@@ -419,6 +419,35 @@ export default function (pi: ExtensionAPI) {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
   };
 
+  // ---- Model-decision persistence: remembered (from→to) confirm answers survive sessions ----
+  // Stored as .omp/model-decisions.json ({"from→to": bool}). In-memory answers win over the
+  // file; delete the file to be asked again. Both accept AND decline persist — "remembers your
+  // answer" must mean the same thing across restarts.
+  let persistedDecisionsLoaded = false;
+  const decisionsPath = (cwd: string) => path.join(cwd, ".omp", "model-decisions.json");
+
+  const loadPersistedDecisions = (cwd: string) => {
+    if (persistedDecisionsLoaded) return;
+    persistedDecisionsLoaded = true;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(decisionsPath(cwd), "utf-8")) as Record<string, unknown>;
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === "boolean" && !modelDecisions.has(k)) modelDecisions.set(k, v);
+      }
+    } catch {
+      // Missing or malformed file — start fresh; the next decision rewrites it.
+    }
+  };
+
+  const persistDecisions = (cwd: string) => {
+    try {
+      fs.mkdirSync(path.join(cwd, ".omp"), { recursive: true });
+      fs.writeFileSync(decisionsPath(cwd), JSON.stringify(Object.fromEntries(modelDecisions), null, 2) + "\n", "utf-8");
+    } catch (err) {
+      debugLog("model-decision persist failed", { error: (err as Error).message });
+    }
+  };
+
   /**
    * Log a telemetry entry for this routing decision to .profile-router-telemetry.log.
    * Appends one line per route (never truncates).
@@ -564,6 +593,7 @@ export default function (pi: ExtensionAPI) {
         const changed = !current || resolved.id !== current.id || resolved.provider !== current.provider;
         if (changed) {
           const key = `${current ? `${current.provider}/${current.id}` : "?"}→${resolved.provider}/${resolved.id}`;
+          loadPersistedDecisions(ctx.cwd);
           let approved = modelDecisions.get(key);
           if (approved === undefined) {
             approved = await ctx.ui.confirm(
@@ -571,6 +601,7 @@ export default function (pi: ExtensionAPI) {
               `Profile "${next.matched.map((m) => m.name).join("+") || "default"}" suggests ${resolved.provider}/${resolved.id} (current: ${current ? `${current.provider}/${current.id}` : "unknown"})`,
             );
             modelDecisions.set(key, approved);
+            persistDecisions(ctx.cwd);
           }
           if (approved) {
             modelSwitchesAccepted++;

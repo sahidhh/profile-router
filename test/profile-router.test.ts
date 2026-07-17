@@ -2136,6 +2136,43 @@ describe("telemetry: routing decisions logged to .profile-router-telemetry.log",
   });
 });
 
+describe("model-decision persistence: confirm answers survive sessions via .omp/model-decisions.json", () => {
+  test("a fresh session reuses the persisted answer instead of re-confirming; declines persist too", async () => {
+    await withTempProjectDir(async (dir) => {
+      const bundles: Bundles = {
+        profiles: [profile({ name: "routed", keywords: ["routed-kw"], model: ["anthropic/claude-sonnet-5"] })],
+      };
+      writeBundles(dir, bundles);
+      const sonnet = { id: "claude-sonnet-5", provider: "anthropic", name: "Sonnet" };
+
+      // Session 1: no stored decision -> confirm fires once, answer (accept) is persisted.
+      const s1 = await installExtension(dir);
+      let s1Confirms = 0;
+      s1.ctx.models.resolve = ((spec: string) => (spec === "anthropic/claude-sonnet-5" ? sonnet : undefined)) as never;
+      s1.ctx.ui.confirm = async () => {
+        s1Confirms++;
+        return true;
+      };
+      await s1.handlers["before_agent_start"]!({ prompt: "routed-kw please", systemPrompt: [] }, s1.ctx);
+      assert.equal(s1Confirms, 1, "first-ever decision asks the user");
+      const stored = JSON.parse(fs.readFileSync(path.join(dir, ".omp", "model-decisions.json"), "utf-8"));
+      assert.deepEqual(stored, { "?→anthropic/claude-sonnet-5": true }, "decision persisted under its (from→to) key");
+
+      // Session 2 (fresh extension instance, same dir): decision loaded, no re-confirm, switch applied.
+      const s2 = await installExtension(dir);
+      let s2Confirms = 0;
+      s2.ctx.models.resolve = s1.ctx.models.resolve;
+      s2.ctx.ui.confirm = async () => {
+        s2Confirms++;
+        return true;
+      };
+      await s2.handlers["before_agent_start"]!({ prompt: "routed-kw again please", systemPrompt: [] }, s2.ctx);
+      assert.equal(s2Confirms, 0, "persisted decision must suppress the dialog in a new session");
+      assert.deepEqual(s2.setModelCalls, [sonnet], "persisted accept still applies the switch");
+    });
+  });
+});
+
 describe("toolset restore: a profile restriction never outlives its matching turns", () => {
   test("restricted profile -> no-match turn restores the pre-restriction baseline exactly once", async () => {
     await withTempProjectDir(async (dir) => {
