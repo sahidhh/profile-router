@@ -2042,4 +2042,29 @@ describe("telemetry: routing decisions logged to .profile-router-telemetry.log",
       assert.equal(logEntry.runnerUpProfile, "weak", "runner-up should be weak");
     });
   });
+
+  test("manual pin: runner-up is the top OTHER scorer, never the chosen profile; margin may go negative", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "loud", keywords: ["loud-kw", "extra-kw"] }),
+          profile({ name: "quiet", keywords: ["quiet-kw"] }),
+        ],
+      });
+      const { handlers, commands, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      // Pin the profile the classifier would NOT pick, then send a prompt the
+      // other profile wins on. The logged runner-up must be the actual top
+      // competitor ("loud"), not explain_rows[1] (which is the pinned profile
+      // itself here), and the margin must record that the pin was outranked.
+      await commands["profile"]!.handler("quiet", ctx);
+      await handlers["before_agent_start"]!({ prompt: "loud-kw extra-kw content", systemPrompt: [] }, ctx);
+
+      const logEntry = JSON.parse(fs.readFileSync(logPath, "utf-8").trim());
+      assert.equal(logEntry.chosenProfile, "quiet", "pinned profile is the chosen one");
+      assert.equal(logEntry.runnerUpProfile, "loud", "runner-up must be the best-scoring OTHER profile");
+      assert.equal(logEntry.margin, -2, "margin = chosen score (0) - top other score (2)");
+    });
+  });
 });

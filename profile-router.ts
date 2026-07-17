@@ -444,10 +444,14 @@ export default function (pi: ExtensionAPI) {
     explain_rows: ReturnType<typeof explain>,
   ) => {
     try {
-      // Find the chosen profile's score and runner-up in the full explain ranking
+      // Find the chosen profile's score and runner-up in the full explain ranking.
+      // Runner-up = the best-scoring profile OTHER than the chosen one — under a
+      // manual pin or sticky inheritance the chosen profile need not be the top
+      // scorer, so indexing [1] would log the wrong competitor. A negative margin
+      // then correctly records that the classifier ranked another profile higher.
       const chosenRow = explain_rows.find((r) => r.name === chosenProfileName);
       const chosenScore = chosenRow?.score ?? 0;
-      const runnerUpRow = explain_rows[1]; // second-highest, already sorted by explain()
+      const runnerUpRow = explain_rows.find((r) => r.name !== chosenProfileName);
       const runnerUpScore = runnerUpRow?.score ?? 0;
       const margin = chosenScore - runnerUpScore;
       const runnerUpName = runnerUpRow?.name ?? null;
