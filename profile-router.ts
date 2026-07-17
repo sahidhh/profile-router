@@ -354,6 +354,29 @@ export function validateBundles(bundles: Bundles): string[] {
     if (!Array.isArray(p.keywords) || p.keywords.length === 0) {
       problems.push(`${label}: "keywords" must be a non-empty array`);
     }
+    // Every term list must hold only strings — a non-string entry passes Array.isArray
+    // but crashes classify() at routing time (term.toLowerCase is not a function), i.e.
+    // a config that "validated" would still take down the hook.
+    const termFields: [string, unknown][] = [
+      ["keywords", p.keywords],
+      ["verbs", p.verbs],
+      ["scopes", p.scopes],
+      ["excludeKeywords", p.excludeKeywords],
+    ];
+    for (const [field, list] of termFields) {
+      if (list === undefined) continue;
+      if (!Array.isArray(list)) {
+        // keywords' non-array case is already reported above
+        if (field !== "keywords") problems.push(`${label}: "${field}" must be an array of strings`);
+        continue;
+      }
+      if (list.some((t) => typeof t !== "string")) {
+        problems.push(`${label}: "${field}" entries must all be strings`);
+      }
+    }
+    if (p.minScore !== undefined && typeof p.minScore !== "number") {
+      problems.push(`${label}: "minScore" must be a number`);
+    }
     if (p.thinkingLevel !== undefined && !VALID_THINKING_LEVELS.includes(p.thinkingLevel)) {
       problems.push(`${label}: thinkingLevel "${p.thinkingLevel}" is not one of ${VALID_THINKING_LEVELS.join("/")}`);
     }
@@ -376,10 +399,17 @@ export function validateBundles(bundles: Bundles): string[] {
       problems.push(`${label}: "suppresses" must be an array of strings`);
     }
     if (p.capabilities !== undefined) {
-      const c = p.capabilities as Record<string, unknown>;
-      const badKey = Object.keys(c).find((k) => !["read", "write", "execute"].includes(k) || typeof c[k] !== "boolean");
-      if (typeof c !== "object" || c === null || badKey !== undefined) {
+      // Shape check must precede key enumeration — Object.keys(null) throws, which
+      // previously made the validator itself crash on `"capabilities": null`.
+      const c: unknown = p.capabilities;
+      if (typeof c !== "object" || c === null || Array.isArray(c)) {
         problems.push(`${label}: "capabilities" must be an object of {read?, write?, execute?: boolean}`);
+      } else {
+        const rec = c as Record<string, unknown>;
+        const badKey = Object.keys(rec).find((k) => !["read", "write", "execute"].includes(k) || typeof rec[k] !== "boolean");
+        if (badKey !== undefined) {
+          problems.push(`${label}: "capabilities" must be an object of {read?, write?, execute?: boolean}`);
+        }
       }
     }
   });

@@ -414,6 +414,51 @@ describe("validateBundles", () => {
     assert.ok(problems.some((p) => p.includes("thinkingLevel")));
     assert.ok(problems.some((p) => p.includes("model")));
   });
+
+  test("capabilities: null is reported as a problem, not a validator crash", () => {
+    const bundles: Bundles = {
+      profiles: [profile({ name: "nullcap", keywords: ["a"], capabilities: null as never })],
+    };
+    const problems = validateBundles(bundles);
+    assert.ok(problems.some((p) => p.includes("capabilities")));
+  });
+
+  test("capabilities as an array is reported as a problem", () => {
+    const bundles: Bundles = {
+      profiles: [profile({ name: "arrcap", keywords: ["a"], capabilities: [true] as never })],
+    };
+    assert.ok(validateBundles(bundles).some((p) => p.includes("capabilities")));
+  });
+
+  test("non-string entries in keywords/verbs/scopes/excludeKeywords are flagged (would crash classify)", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({ name: "badkw", keywords: ["ok", 42 as never] }),
+        profile({ name: "badverb", keywords: ["a"], verbs: [null as never] }),
+        profile({ name: "badscope", keywords: ["a"], scopes: [{} as never] }),
+        profile({ name: "badexcl", keywords: ["a"], excludeKeywords: [1 as never] }),
+      ],
+    };
+    const problems = validateBundles(bundles);
+    assert.ok(problems.some((p) => p.includes('"badkw"') && p.includes("keywords")));
+    assert.ok(problems.some((p) => p.includes('"badverb"') && p.includes("verbs")));
+    assert.ok(problems.some((p) => p.includes('"badscope"') && p.includes("scopes")));
+    assert.ok(problems.some((p) => p.includes('"badexcl"') && p.includes("excludeKeywords")));
+  });
+
+  test("non-array verbs/scopes/excludeKeywords are flagged", () => {
+    const bundles: Bundles = {
+      profiles: [profile({ name: "strverbs", keywords: ["a"], verbs: "find" as never })],
+    };
+    assert.ok(validateBundles(bundles).some((p) => p.includes("verbs") && p.includes("array")));
+  });
+
+  test("non-numeric minScore is flagged", () => {
+    const bundles: Bundles = {
+      profiles: [profile({ name: "badmin", keywords: ["a"], minScore: "3" as never })],
+    };
+    assert.ok(validateBundles(bundles).some((p) => p.includes("minScore")));
+  });
 });
 
 // ---------- bundles.schema.json ----------
