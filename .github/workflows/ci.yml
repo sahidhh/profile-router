@@ -9,10 +9,15 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 22 is the baseline; 24 guards --experimental-strip-types semantics drift
+        # across release lines (the test runner depends on the flag).
+        node-version: ["22", "24"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
-      - run: npm install
+          node-version: ${{ matrix.node-version }}
+      - run: npm ci
       - run: npm run check
