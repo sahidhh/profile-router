@@ -112,3 +112,7 @@ dist
 # TernJS port file
 .tern-port
 .session/
+
+# profile-router local data — raw prompt text lives next to the committed
+# bundles.json, so ignore it explicitly (the telemetry log is covered by *.log)
+.omp/misroutes.jsonl
