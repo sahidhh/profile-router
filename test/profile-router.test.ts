@@ -414,6 +414,51 @@ describe("validateBundles", () => {
     assert.ok(problems.some((p) => p.includes("thinkingLevel")));
     assert.ok(problems.some((p) => p.includes("model")));
   });
+
+  test("capabilities: null is reported as a problem, not a validator crash", () => {
+    const bundles: Bundles = {
+      profiles: [profile({ name: "nullcap", keywords: ["a"], capabilities: null as never })],
+    };
+    const problems = validateBundles(bundles);
+    assert.ok(problems.some((p) => p.includes("capabilities")));
+  });
+
+  test("capabilities as an array is reported as a problem", () => {
+    const bundles: Bundles = {
+      profiles: [profile({ name: "arrcap", keywords: ["a"], capabilities: [true] as never })],
+    };
+    assert.ok(validateBundles(bundles).some((p) => p.includes("capabilities")));
+  });
+
+  test("non-string entries in keywords/verbs/scopes/excludeKeywords are flagged (would crash classify)", () => {
+    const bundles: Bundles = {
+      profiles: [
+        profile({ name: "badkw", keywords: ["ok", 42 as never] }),
+        profile({ name: "badverb", keywords: ["a"], verbs: [null as never] }),
+        profile({ name: "badscope", keywords: ["a"], scopes: [{} as never] }),
+        profile({ name: "badexcl", keywords: ["a"], excludeKeywords: [1 as never] }),
+      ],
+    };
+    const problems = validateBundles(bundles);
+    assert.ok(problems.some((p) => p.includes('"badkw"') && p.includes("keywords")));
+    assert.ok(problems.some((p) => p.includes('"badverb"') && p.includes("verbs")));
+    assert.ok(problems.some((p) => p.includes('"badscope"') && p.includes("scopes")));
+    assert.ok(problems.some((p) => p.includes('"badexcl"') && p.includes("excludeKeywords")));
+  });
+
+  test("non-array verbs/scopes/excludeKeywords are flagged", () => {
+    const bundles: Bundles = {
+      profiles: [profile({ name: "strverbs", keywords: ["a"], verbs: "find" as never })],
+    };
+    assert.ok(validateBundles(bundles).some((p) => p.includes("verbs") && p.includes("array")));
+  });
+
+  test("non-numeric minScore is flagged", () => {
+    const bundles: Bundles = {
+      profiles: [profile({ name: "badmin", keywords: ["a"], minScore: "3" as never })],
+    };
+    assert.ok(validateBundles(bundles).some((p) => p.includes("minScore")));
+  });
 });
 
 // ---------- bundles.schema.json ----------
@@ -800,6 +845,7 @@ async function installExtension(dir: string) {
   const commands: Record<string, { handler: (args: string, ctx: unknown) => unknown }> = {};
   const notifications: { msg: string; level: string }[] = [];
   const setModelCalls: unknown[] = [];
+  const setActiveToolsCalls: string[][] = [];
 
   const fakePi = {
     on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
@@ -813,7 +859,10 @@ async function installExtension(dir: string) {
       return true;
     },
     setThinkingLevel: () => {},
-    setActiveTools: async () => {},
+    getActiveTools: () => ["read", "grep", "glob", "edit", "write", "bash"],
+    setActiveTools: async (tools: string[]) => {
+      setActiveToolsCalls.push(tools);
+    },
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
   };
   await mod.default(fakePi as never);
@@ -832,7 +881,7 @@ async function installExtension(dir: string) {
     model: undefined,
   };
 
-  return { handlers, commands, notifications, statuses, setModelCalls, ctx };
+  return { handlers, commands, notifications, statuses, setModelCalls, setActiveToolsCalls, ctx };
 }
 
 describe("F2 regression: stale /profile override never mislabels an auto-classified profile as manual", () => {
@@ -1722,7 +1771,7 @@ describe("T01-03: two-axis scoring routing", () => {
   const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
   const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
 
-  test('"explore and explain this repository" -> investigation (lookup disqualified by excludeKeywords "repository")', () => {
+  test('"explore and explain this repository" -> investigation (lookup disqualified by excludeKeywords "explore")', () => {
     const hits = classify("explore and explain this repository", realBundles);
     assert.equal(hits[0]?.profile.name, "investigation");
   });
@@ -1737,9 +1786,14 @@ describe("T01-03: two-axis scoring routing", () => {
     assert.equal(hits[0]?.profile.name, "lookup");
   });
 
-  test('"what does this repo do" -> investigation ("repo" scope; lookup disqualified by excludeKeywords)', () => {
+  // D-F2 resolution flipped this expectation: "what does this repo do" is an orientation
+  // question (repo-scope routing doctrine: orientation -> lookup). It previously landed on
+  // investigation only via the score-2 tie-break on the shared "repo" breadth scope, which
+  // also silently lifted lookup's sub-agent ban through disabledAgents intersection.
+  test('"what does this repo do" -> lookup (orientation; investigation no longer scores on bare breadth nouns)', () => {
     const hits = classify("what does this repo do", realBundles);
-    assert.equal(hits[0]?.profile.name, "investigation");
+    assert.equal(hits[0]?.profile.name, "lookup");
+    assert.ok(!hits.some((h) => h.profile.name === "investigation"), "investigation must not co-match on a bare breadth noun");
   });
 
   test('"fix the failing test" -> implementation ("failing test" keyword)', () => {
@@ -1876,6 +1930,48 @@ describe("golden: prod-failure regression lock", () => {
 
 // ---------- Repo-scope routing: orientation prompts route to lookup ----------
 
+// ---------- D-F2 resolution: orientation prompts must not co-match investigation ----------
+// The leak (DECISIONS.md D-F2, observed live in a production system prompt): lookup and
+// investigation both scored on breadth nouns ("repo"/"repository"/"codebase"/"project"), so an
+// orientation prompt co-matched both. disabledAgents intersection ({task} ∩ {} = {}) then
+// silently lifted lookup's sub-agent ban, and investigation's reproduce/root-cause rules
+// unioned into a cheap flash-lite lookup run.
+describe("D-F2: orientation prompts match lookup ALONE; sub-agent ban survives", () => {
+  const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
+  const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
+
+  for (const prompt of [
+    "explain this repo",
+    "explain this repo - optimal scan use micro sub-agents or tools",
+    "overview of the codebase",
+    "summarize the project",
+  ]) {
+    test(`"${prompt}" -> lookup only, task ban intact, no investigation rules`, () => {
+      const hits = classify(prompt, realBundles);
+      assert.equal(hits[0]?.profile.name, "lookup");
+      assert.ok(
+        !hits.some((h) => h.profile.name === "investigation"),
+        `investigation must not co-match an orientation prompt (hits: ${hits.map((h) => `${h.profile.name}:${h.score}`).join(", ")})`,
+      );
+      const merged = merge(hits, realBundles);
+      assert.ok(merged.disabledAgents.includes("task"), "lookup's sub-agent ban must survive the merge");
+      assert.ok(
+        !merged.rules.some((r) => /reproduce before diagnosing/i.test(r)),
+        "investigation's reproduce-first rule must not leak into a lookup run",
+      );
+    });
+  }
+
+  test("exploration rule appears exactly once when profiles co-match (canonical wording shared)", () => {
+    // lookup + implementation co-match (golden #5's scenario): both declare the exploration
+    // rule; identical wording means dedup-by-text collapses it to one injected line.
+    const hits = classify("implement the feature and explain how the auth flow works", realBundles);
+    const merged = merge(hits, realBundles);
+    const exploreRules = merged.rules.filter((r) => /^Explore structurally:/.test(r));
+    assert.ok(exploreRules.length <= 1, `expected at most one exploration rule, got: ${exploreRules.join(" | ")}`);
+  });
+});
+
 describe("repo-scope routing: orientation -> lookup, escalation -> investigation", () => {
   const bundlesPath = path.join(import.meta.dirname, "..", "bundles.json");
   const realBundles = JSON.parse(fs.readFileSync(bundlesPath, "utf-8")) as Bundles;
@@ -1885,7 +1981,7 @@ describe("repo-scope routing: orientation -> lookup, escalation -> investigation
     { prompt: "overview of the codebase", expected: "lookup", note: "orientation vocabulary + breadth scope" },
     { prompt: "summarize the project", expected: "lookup", note: "orientation vocabulary + breadth scope" },
     { prompt: "read every file in the repo", expected: "investigation", note: "exhaustive-scan escalation" },
-    { prompt: "root cause the crash in the repo", expected: "investigation", note: "investigation verb outranks the shared scope" },
+    { prompt: "root cause the crash in the repo", expected: "investigation", note: "root cause + crash (score 2) ties lookup's repo scope; declaration order favors investigation" },
     { prompt: "explain the auth flow", expected: "lookup", note: "regression guard: narrow-scope lookup unchanged" },
   ];
 
@@ -1995,6 +2091,152 @@ describe("telemetry: routing decisions logged to .profile-router-telemetry.log",
       assert.equal(logEntry.margin, 1, "margin should be 2 - 1 = 1");
       assert.equal(logEntry.chosenProfile, "strong", "should choose strong");
       assert.equal(logEntry.runnerUpProfile, "weak", "runner-up should be weak");
+    });
+  });
+
+  test("default (no-match) routes are logged with chosenProfile 'default'", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      await handlers["before_agent_start"]!({ prompt: "totally unrelated wording with many tokens here", systemPrompt: [] }, ctx);
+
+      const logEntry = JSON.parse(fs.readFileSync(logPath, "utf-8").trim());
+      assert.equal(logEntry.chosenProfile, "default", "no-match routes must be logged — they are the missing-vocabulary corpus");
+      assert.equal(logEntry.runnerUpProfile, "alpha", "runner-up is the best real profile even on default routes");
+    });
+  });
+
+  test("manual pin: runner-up is the top OTHER scorer, never the chosen profile; margin may go negative", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "loud", keywords: ["loud-kw", "extra-kw"] }),
+          profile({ name: "quiet", keywords: ["quiet-kw"] }),
+        ],
+      });
+      const { handlers, commands, ctx } = await installExtension(dir);
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+
+      // Pin the profile the classifier would NOT pick, then send a prompt the
+      // other profile wins on. The logged runner-up must be the actual top
+      // competitor ("loud"), not explain_rows[1] (which is the pinned profile
+      // itself here), and the margin must record that the pin was outranked.
+      await commands["profile"]!.handler("quiet", ctx);
+      await handlers["before_agent_start"]!({ prompt: "loud-kw extra-kw content", systemPrompt: [] }, ctx);
+
+      const logEntry = JSON.parse(fs.readFileSync(logPath, "utf-8").trim());
+      assert.equal(logEntry.chosenProfile, "quiet", "pinned profile is the chosen one");
+      assert.equal(logEntry.runnerUpProfile, "loud", "runner-up must be the best-scoring OTHER profile");
+      assert.equal(logEntry.margin, -2, "margin = chosen score (0) - top other score (2)");
+    });
+  });
+});
+
+describe("model-decision persistence: confirm answers survive sessions via .omp/model-decisions.json", () => {
+  test("a fresh session reuses the persisted answer instead of re-confirming; declines persist too", async () => {
+    await withTempProjectDir(async (dir) => {
+      const bundles: Bundles = {
+        profiles: [profile({ name: "routed", keywords: ["routed-kw"], model: ["anthropic/claude-sonnet-5"] })],
+      };
+      writeBundles(dir, bundles);
+      const sonnet = { id: "claude-sonnet-5", provider: "anthropic", name: "Sonnet" };
+
+      // Session 1: no stored decision -> confirm fires once, answer (accept) is persisted.
+      const s1 = await installExtension(dir);
+      let s1Confirms = 0;
+      s1.ctx.models.resolve = ((spec: string) => (spec === "anthropic/claude-sonnet-5" ? sonnet : undefined)) as never;
+      s1.ctx.ui.confirm = async () => {
+        s1Confirms++;
+        return true;
+      };
+      await s1.handlers["before_agent_start"]!({ prompt: "routed-kw please", systemPrompt: [] }, s1.ctx);
+      assert.equal(s1Confirms, 1, "first-ever decision asks the user");
+      const stored = JSON.parse(fs.readFileSync(path.join(dir, ".omp", "model-decisions.json"), "utf-8"));
+      assert.deepEqual(stored, { "?→anthropic/claude-sonnet-5": true }, "decision persisted under its (from→to) key");
+
+      // Session 2 (fresh extension instance, same dir): decision loaded, no re-confirm, switch applied.
+      const s2 = await installExtension(dir);
+      let s2Confirms = 0;
+      s2.ctx.models.resolve = s1.ctx.models.resolve;
+      s2.ctx.ui.confirm = async () => {
+        s2Confirms++;
+        return true;
+      };
+      await s2.handlers["before_agent_start"]!({ prompt: "routed-kw again please", systemPrompt: [] }, s2.ctx);
+      assert.equal(s2Confirms, 0, "persisted decision must suppress the dialog in a new session");
+      assert.deepEqual(s2.setModelCalls, [sonnet], "persisted accept still applies the switch");
+    });
+  });
+});
+
+describe("toolset restore: a profile restriction never outlives its matching turns", () => {
+  test("restricted profile -> no-match turn restores the pre-restriction baseline exactly once", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "narrow", keywords: ["narrow-kw"], tools: ["read", "grep"] })],
+      });
+      const { handlers, setActiveToolsCalls, statuses, ctx } = await installExtension(dir);
+
+      await handlers["before_agent_start"]!({ prompt: "narrow-kw please look around", systemPrompt: [] }, ctx);
+      assert.deepEqual(setActiveToolsCalls[0], ["read", "grep"], "restriction applied");
+      assert.equal(statuses["profile"], "⚙ narrow 🔒", "status line marks the restricted toolset");
+
+      // No-match prompt (>=6 tokens so stickiness cannot inherit): baseline restored.
+      await handlers["before_agent_start"]!({ prompt: "completely unrelated wording spanning many many tokens", systemPrompt: [] }, ctx);
+      assert.equal(setActiveToolsCalls.length, 2, "restore fires once");
+      assert.deepEqual(
+        setActiveToolsCalls[1],
+        ["read", "grep", "glob", "edit", "write", "bash"],
+        "baseline captured before the restriction is what gets restored",
+      );
+      assert.equal(statuses["profile"], "⚙ default", "no lock marker once restored");
+
+      // A second unrestricted turn must not call setActiveTools again.
+      await handlers["before_agent_start"]!({ prompt: "another unrelated wording spanning many many tokens", systemPrompt: [] }, ctx);
+      assert.equal(setActiveToolsCalls.length, 2, "no redundant restore on already-unrestricted turns");
+    });
+  });
+});
+
+describe("/profile telemetry: routing-log summary", () => {
+  test("no log file -> 'No telemetry recorded yet'", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "alpha", keywords: ["alpha-kw"] })] });
+      const { commands, notifications, ctx } = await installExtension(dir);
+      await commands["profile"]!.handler("telemetry", ctx);
+      assert.ok(
+        notifications.some((n) => /No telemetry recorded yet/.test(n.msg)),
+        `expected missing-log notice, got: ${notifications.map((n) => n.msg).join(" | ")}`,
+      );
+    });
+  });
+
+  test("summarizes per-profile counts, default routes, and low-margin routes", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "alpha", keywords: ["alpha-kw", "alpha-two"] }),
+          profile({ name: "beta", keywords: ["beta-kw"] }),
+        ],
+      });
+      const { handlers, commands, notifications, ctx } = await installExtension(dir);
+
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw alpha-two content", systemPrompt: [] }, ctx); // alpha, margin 2
+      await handlers["before_agent_start"]!({ prompt: "alpha-kw beta-kw mixed", systemPrompt: [] }, ctx);      // alpha, margin 0 (low)
+      await handlers["before_agent_start"]!({ prompt: "nothing matches this wording at all", systemPrompt: [] }, ctx); // default
+
+      await commands["profile"]!.handler("telemetry", ctx);
+      const summary = notifications.map((n) => n.msg).find((m) => /^Telemetry \(/.test(m));
+      assert.ok(summary, `expected a telemetry summary, got: ${notifications.map((n) => n.msg).join(" | ")}`);
+      assert.ok(/Telemetry \(3 routes/.test(summary!), `route count wrong: ${summary}`);
+      assert.ok(/alpha: 2/.test(summary!), `alpha count wrong: ${summary}`);
+      assert.ok(/default: 1/.test(summary!), `default count wrong: ${summary}`);
+      assert.ok(/1 default route — prompts the vocabulary missed/.test(summary!), `default callout missing: ${summary}`);
+      assert.ok(/Low-margin routes \(margin <= 1\): 2/.test(summary!), `low-margin count wrong: ${summary}`);
     });
   });
 });

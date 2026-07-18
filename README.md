@@ -10,9 +10,9 @@ LLM calls** — it's word-boundary keyword scoring, so routing costs nothing.
 ```
 prompt ──► classify (keywords, no LLM) ──► merge matched profiles ──► apply
                                                                        ├─ rules → system prompt (this turn only)
-                                                                       ├─ model → confirm dialog, remembered per (from→to)
+                                                                       ├─ model → confirm dialog, remembered per (from→to), persisted across sessions
                                                                        ├─ thinkingLevel → silent
-                                                                       ├─ tools → setActiveTools (only if non-empty)
+                                                                       ├─ tools → setActiveTools (🔒 in status; baseline auto-restored when no profile restricts)
                                                                        └─ disabledAgents → task-tool calls blocked
 ```
 
@@ -69,7 +69,8 @@ context.
 - **Let keywords do the routing; pin only for exceptions.** `/profile <name>`
   pins, `/profile clear` unpins, `/profile` shows scores. The status line
   (`⚙ lookup`) always shows what matched — glance at it before the model
-  starts spending tokens. Add `--once` (`/profile <name> --once`) to pin for
+  starts spending tokens; a `🔒` suffix means the profile restricted the
+  toolset (auto-restored on the next unrestricted prompt). Add `--once` (`/profile <name> --once`) to pin for
   just the next prompt — it auto-clears immediately after that one prompt is
   classified, so you don't have to remember to `/profile clear` afterward.
 - **Discover and debug with the `/profile` subcommands:**
@@ -83,6 +84,12 @@ context.
   - `/profile validate` — structural check of `bundles.json` (duplicate names,
     empty keywords, bad `thinkingLevel`/`model`) without sending a prompt.
   - `/profile stats` — session counters: prompts classified per profile (including default), manual pins set, model switches accepted/declined.
+  - `/profile telemetry` — summary of the routing log: per-profile route counts,
+    default (no-match) routes — the prompts your vocabulary missed — and
+    low-margin routes one stray keyword away from flipping profile. Every
+    routing decision (default included) is logged to
+    `.profile-router-telemetry.log` (gitignored; prompt text truncated to 200
+    chars).
   - `/profile rules` — prints the exact rules/skills block currently being injected into the system prompt for the active profile.
   - `/profile misroute [expected-profile]` — logs the last classified prompt
     (truncated to 500 chars), what it matched, and (optionally) what profile

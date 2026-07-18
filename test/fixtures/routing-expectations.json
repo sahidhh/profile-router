@@ -41,8 +41,8 @@
   },
   {
     "prompt": "What's the best way to onboard a new hire onto our codebase over their first week?",
-    "expected": "investigation",
-    "note": "T01-03: 'new hire' is not 'new module' and \"what's\" is not \"what is\" (both still near-misses), but 'codebase' is now an investigation.scopes breadth signal (weight 2), so investigation newly qualifies"
+    "expected": "lookup",
+    "note": "D-F2 resolution: breadth nouns are no longer investigation scopes, so this orientation question routes to lookup via its own 'codebase' scope (orientation -> lookup doctrine)"
   },
   {
     "prompt": "Our deployment pipeline runs nightly and emails the team a status digest each morning.",

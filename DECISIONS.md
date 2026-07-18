@@ -606,3 +606,44 @@ Gate before fixing: accumulate real routes via the deployed telemetry
     (a lone scope word can't elect it; needs a real verb too).
   - if COMMON → do the verbs/scopes split properly (the deferred schema work).
 Do NOT fix by adding suppressions — the leak is agent-disabling, not rules.
+## Phase 17 — D-F2 RESOLVED: orientation prompts no longer co-match investigation (2026-07-17)
+
+**Gate disposition.** The gate asked for ~1 week of telemetry before fixing. The owner
+short-circuited it with (a) explicit authorization ("fix anything you can without my
+authorization") and (b) a live production system-prompt sample showing the co-match in the
+wild: `## Active Engineering Rules (lookup+investigation)` — investigation's
+reproduce/root-cause rules injected into a cheap lookup run, near-duplicate exploration rules
+unioned (three wordings of the same rule), and lookup's `task` ban silently lifted by
+disabledAgents intersection, on a prompt that explicitly mentioned "use micro sub-agents".
+That sample is the leak D-F2 predicted, manifesting exactly as written.
+
+**Fix chosen: neither of the two pre-listed options verbatim.**
+- `minScore: 3` (the "rare" branch) was REJECTED after test-driving: it also blocks
+  lone-keyword election ("debug this" → score 1 < 3 → default), breaking the reachability
+  doctrine that a profile's own trigger word elects it.
+- Promoting investigation's action verbs to weight-2 scopes was REJECTED after fixture-driving:
+  "Let's review this PR and also debug why the CI is failing" would flip from review to
+  investigation (debug 2 > review 1), breaking a locked fixture expectation.
+- IMPLEMENTED instead (minimal root fix): the co-match existed only because the breadth nouns
+  `repo`/`repository`/`codebase`/`architecture`/`project` were scopes in BOTH profiles. They
+  are now lookup's alone. Investigation keeps only exhaustive-scan markers as scopes
+  (`all files`, `everything`, `explore`, + new `every file`) and gains two weak contextual
+  keywords (`crash`, `stack trace`) so mixed diagnostics ("root cause the crash in the repo":
+  2) tie lookup's breadth score (2) and win on declaration order. lookup.excludeKeywords grows
+  `explore` and `every file` so exhaustive-scan prompts disqualify lookup outright.
+- Consequences (deliberate expectation flips, both consistent with the 30729c6 doctrine
+  "orientation → lookup"): "what does this repo do" and the onboard-a-new-hire fixture now
+  route to lookup (they previously reached investigation only via the score-2 tie-break on the
+  shared breadth noun, which is the exact mechanism that carried the leak).
+- New regression suite "D-F2: orientation prompts match lookup ALONE" locks: lookup-only match,
+  task ban surviving merge, no reproduce-first rule leakage, and single canonical exploration
+  rule under co-match.
+
+**Rule-wording normalization (same commit).** The exploration rule existed in three wordings
+("…plain grep or bulk reads" / "…plain grep or opening files" / "Search-first, read-restrained:
+…before opening files"), so dedup-by-text could not collapse them on co-match — the production
+sample carried two at once. All profiles (and default.rules) now share one canonical sentence:
+"Explore structurally: lsp for symbols/definitions/references, ast_grep for code patterns,
+before falling back to plain grep or bulk reads." Dedup now collapses it to one injected line
+on any co-match. Not done via `suppresses` — D-F2 forbade suppression-based fixes, and this is
+text unification, not tag negation.

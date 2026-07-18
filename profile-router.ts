@@ -73,45 +73,39 @@ const DEBUG = process.env.PROFILE_ROUTER_DEBUG === "1";
 /** Tracks whether we've already warned about a malformed/missing config this process, per path. */
 const warnedPaths = new Set<string>();
 
-export function loadBundles(cwd: string, notify?: (msg: string) => void): Bundles {
+/**
+ * Load the first-existing bundles.json candidate AND its content hash (sha256,
+ * first 12 hex chars) from a single disk read, so the change-notice hash and the
+ * applied config can never come from two different file states.
+ * hash is null when no file exists or the read itself fails; a file that reads
+ * but fails to parse still hashes (the change notice should fire on a bad edit).
+ */
+export function loadBundlesWithHash(cwd: string, notify?: (msg: string) => void): { bundles: Bundles; hash: string | null } {
   const candidates = [path.join(cwd, ".omp", "bundles.json"), path.join(os.homedir(), ".omp", "bundles.json")];
   for (const p of candidates) {
     if (!fs.existsSync(p)) continue;
+    let hash: string | null = null;
     try {
       const raw = fs.readFileSync(p, "utf-8");
+      hash = crypto.createHash("sha256").update(raw).digest("hex").slice(0, 12);
       const parsed = JSON.parse(raw) as Bundles;
       if (!parsed || !Array.isArray(parsed.profiles)) {
         throw new Error("bundles.json must have a top-level \"profiles\" array");
       }
-      return parsed;
+      return { bundles: parsed, hash };
     } catch (err) {
       if (!warnedPaths.has(p)) {
         warnedPaths.add(p);
         notify?.(`profile-router: failed to parse ${p} (${(err as Error).message}) — continuing with no profiles`);
       }
-      return { profiles: [] };
+      return { bundles: { profiles: [] }, hash };
     }
   }
-  return { profiles: [] };
+  return { bundles: { profiles: [] }, hash: null };
 }
 
-/**
- * Compute a short content hash (sha256, first 12 hex chars) of the first-existing
- * bundles.json candidate without re-implementing config loading.
- * Returns null if no file is found or if a read error occurs.
- */
-function configContentHash(cwd: string): string | null {
-  const candidates = [path.join(cwd, ".omp", "bundles.json"), path.join(os.homedir(), ".omp", "bundles.json")];
-  for (const p of candidates) {
-    if (!fs.existsSync(p)) continue;
-    try {
-      const raw = fs.readFileSync(p, "utf-8");
-      return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 12);
-    } catch {
-      return null;
-    }
-  }
-  return null;
+export function loadBundles(cwd: string, notify?: (msg: string) => void): Bundles {
+  return loadBundlesWithHash(cwd, notify).bundles;
 }
 
 // ---------- Classification (keyword scoring, word-boundary matching) ----------
@@ -176,29 +170,15 @@ export function scoreProfile(text: string, profile: Profile): { score: number; m
 }
 
 // Stickiness: a turn with no qualifying match inherits the previous turn's
-// profile when the new prompt is short (<6 tokens) or is a bare continuation
-// ("ok", "continue", ...) — i.e. it's plausibly still talking about the same
-// thing rather than starting a new topic.
-const CONTINUATION_PHRASES = new Set([
-  "ok",
-  "yes",
-  "go on",
-  "continue",
-  "next",
-  "and",
-  "more",
-  "keep going",
-  "do it",
-  "proceed",
-  "thanks",
-  "now fix it",
-]);
-
+// profile when the new prompt is short (<6 tokens) — i.e. it's plausibly a bare
+// continuation ("ok", "continue", "now fix it", ...) still talking about the
+// same thing rather than starting a new topic. Every known continuation phrase
+// is under 6 tokens, so the token threshold alone covers them; a phrase list
+// would only matter for continuations of 6+ tokens, which don't exist.
 function isStickyContinuation(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length === 0) return false;
-  const tokenCount = trimmed.split(/\s+/).length;
-  return tokenCount < 6 || CONTINUATION_PHRASES.has(trimmed);
+  return trimmed.split(/\s+/).length < 6;
 }
 
 export function classify(
@@ -354,6 +334,29 @@ export function validateBundles(bundles: Bundles): string[] {
     if (!Array.isArray(p.keywords) || p.keywords.length === 0) {
       problems.push(`${label}: "keywords" must be a non-empty array`);
     }
+    // Every term list must hold only strings — a non-string entry passes Array.isArray
+    // but crashes classify() at routing time (term.toLowerCase is not a function), i.e.
+    // a config that "validated" would still take down the hook.
+    const termFields: [string, unknown][] = [
+      ["keywords", p.keywords],
+      ["verbs", p.verbs],
+      ["scopes", p.scopes],
+      ["excludeKeywords", p.excludeKeywords],
+    ];
+    for (const [field, list] of termFields) {
+      if (list === undefined) continue;
+      if (!Array.isArray(list)) {
+        // keywords' non-array case is already reported above
+        if (field !== "keywords") problems.push(`${label}: "${field}" must be an array of strings`);
+        continue;
+      }
+      if (list.some((t) => typeof t !== "string")) {
+        problems.push(`${label}: "${field}" entries must all be strings`);
+      }
+    }
+    if (p.minScore !== undefined && typeof p.minScore !== "number") {
+      problems.push(`${label}: "minScore" must be a number`);
+    }
     if (p.thinkingLevel !== undefined && !VALID_THINKING_LEVELS.includes(p.thinkingLevel)) {
       problems.push(`${label}: thinkingLevel "${p.thinkingLevel}" is not one of ${VALID_THINKING_LEVELS.join("/")}`);
     }
@@ -376,10 +379,17 @@ export function validateBundles(bundles: Bundles): string[] {
       problems.push(`${label}: "suppresses" must be an array of strings`);
     }
     if (p.capabilities !== undefined) {
-      const c = p.capabilities as Record<string, unknown>;
-      const badKey = Object.keys(c).find((k) => !["read", "write", "execute"].includes(k) || typeof c[k] !== "boolean");
-      if (typeof c !== "object" || c === null || badKey !== undefined) {
+      // Shape check must precede key enumeration — Object.keys(null) throws, which
+      // previously made the validator itself crash on `"capabilities": null`.
+      const c: unknown = p.capabilities;
+      if (typeof c !== "object" || c === null || Array.isArray(c)) {
         problems.push(`${label}: "capabilities" must be an object of {read?, write?, execute?: boolean}`);
+      } else {
+        const rec = c as Record<string, unknown>;
+        const badKey = Object.keys(rec).find((k) => !["read", "write", "execute"].includes(k) || typeof rec[k] !== "boolean");
+        if (badKey !== undefined) {
+          problems.push(`${label}: "capabilities" must be an object of {read?, write?, execute?: boolean}`);
+        }
       }
     }
   });
@@ -403,9 +413,39 @@ export default function (pi: ExtensionAPI) {
   let modelSwitchesDeclined = 0;
   let lastConfigHash: string | null = null;       // content hash from the most recent bundles.json load this session
   let stickyPrevProfile: string | null = null;    // last active profile name, for stickiness inheritance; reset on explicit /profile pin/clear or new session
+  let baselineTools: string[] | null = null;      // toolset captured before the first profile restriction this session, restored on no-tools turns
 
   const debugLog = (msg: string, context?: Record<string, unknown>) => {
     if (DEBUG) pi.logger.debug(`[profile-router] ${msg}`, context);
+  };
+
+  // ---- Model-decision persistence: remembered (from→to) confirm answers survive sessions ----
+  // Stored as .omp/model-decisions.json ({"from→to": bool}). In-memory answers win over the
+  // file; delete the file to be asked again. Both accept AND decline persist — "remembers your
+  // answer" must mean the same thing across restarts.
+  let persistedDecisionsLoaded = false;
+  const decisionsPath = (cwd: string) => path.join(cwd, ".omp", "model-decisions.json");
+
+  const loadPersistedDecisions = (cwd: string) => {
+    if (persistedDecisionsLoaded) return;
+    persistedDecisionsLoaded = true;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(decisionsPath(cwd), "utf-8")) as Record<string, unknown>;
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === "boolean" && !modelDecisions.has(k)) modelDecisions.set(k, v);
+      }
+    } catch {
+      // Missing or malformed file — start fresh; the next decision rewrites it.
+    }
+  };
+
+  const persistDecisions = (cwd: string) => {
+    try {
+      fs.mkdirSync(path.join(cwd, ".omp"), { recursive: true });
+      fs.writeFileSync(decisionsPath(cwd), JSON.stringify(Object.fromEntries(modelDecisions), null, 2) + "\n", "utf-8");
+    } catch (err) {
+      debugLog("model-decision persist failed", { error: (err as Error).message });
+    }
   };
 
   /**
@@ -420,10 +460,14 @@ export default function (pi: ExtensionAPI) {
     explain_rows: ReturnType<typeof explain>,
   ) => {
     try {
-      // Find the chosen profile's score and runner-up in the full explain ranking
+      // Find the chosen profile's score and runner-up in the full explain ranking.
+      // Runner-up = the best-scoring profile OTHER than the chosen one — under a
+      // manual pin or sticky inheritance the chosen profile need not be the top
+      // scorer, so indexing [1] would log the wrong competitor. A negative margin
+      // then correctly records that the classifier ranked another profile higher.
       const chosenRow = explain_rows.find((r) => r.name === chosenProfileName);
       const chosenScore = chosenRow?.score ?? 0;
-      const runnerUpRow = explain_rows[1]; // second-highest, already sorted by explain()
+      const runnerUpRow = explain_rows.find((r) => r.name !== chosenProfileName);
       const runnerUpScore = runnerUpRow?.score ?? 0;
       const margin = chosenScore - runnerUpScore;
       const runnerUpName = runnerUpRow?.name ?? null;
@@ -448,10 +492,14 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Every prompt: classify, merge, inject ----
   pi.on("before_agent_start", async (event, ctx) => {
-    const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+    const { bundles, hash: currentHash } = loadBundlesWithHash(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
     lastPrompt = event.prompt;
 
-    const currentHash = configContentHash(ctx.cwd);
+    // Telemetry and the debug trace both need the full explain() ranking; score
+    // the profile table at most once per prompt and share the rows.
+    let cachedExplainRows: ReturnType<typeof explain> | null = null;
+    const explainRows = () => (cachedExplainRows ??= explain(event.prompt, bundles));
+
     if (currentHash !== null) {
       if (lastConfigHash !== null && currentHash !== lastConfigHash) {
         ctx.ui.notify(`bundles.json changed (${currentHash}) — applied`, "info");
@@ -500,11 +548,9 @@ export default function (pi: ExtensionAPI) {
 
     debugLog("classified", { prompt: event.prompt.slice(0, 80), matched: next.matched });
 
-    // ---- Telemetry: log every routing decision ----
-    if (next.matched.length > 0) {
-      const explain_rows = explain(event.prompt, bundles);
-      logTelemetry(ctx.cwd, event.prompt, next.matched[0]!.name, explain_rows);
-    }
+    // ---- Telemetry: log every routing decision, including default (no-match) routes.
+    // Default rows are the prompts the vocabulary missed — the highest-value tuning data.
+    logTelemetry(ctx.cwd, event.prompt, next.matched[0]?.name ?? "default", explainRows());
 
     // ---- Debug trace: explain WHY this prompt routed where it did (toggled via /profile debug) ----
     if (debugTrace) {
@@ -514,18 +560,19 @@ export default function (pi: ExtensionAPI) {
       } else if (matches[0]?.inherited) {
         lines.push(`  → ${matches[0].profile.name} (inherited from prev turn)`);
       } else {
-        const rows = explain(event.prompt, bundles);
-        lines.push(...formatTraceLines(rows));
+        lines.push(...formatTraceLines(explainRows()));
       }
       ctx.ui.notify(lines.join("\n"), "info");
     }
 
     // Status line: ALWAYS visible so misclassification is caught before damage.
+    // 🔒 marks a restricted toolset — otherwise the restriction is invisible until
+    // a tool is missing mid-run.
     ctx.ui.setStatus(
       "profile",
-      next.matched.length
+      (next.matched.length
         ? `⚙ ${next.matched.map((m) => m.name).join("+")}${overrideApplied ? (overrideWasOnce ? " (manual, once)" : " (manual)") : ""}`
-        : "⚙ default",
+        : "⚙ default") + (next.tools.length > 0 ? " 🔒" : ""),
     );
 
     // ---- Model routing: suggest + confirm, only on actual change ----
@@ -546,6 +593,7 @@ export default function (pi: ExtensionAPI) {
         const changed = !current || resolved.id !== current.id || resolved.provider !== current.provider;
         if (changed) {
           const key = `${current ? `${current.provider}/${current.id}` : "?"}→${resolved.provider}/${resolved.id}`;
+          loadPersistedDecisions(ctx.cwd);
           let approved = modelDecisions.get(key);
           if (approved === undefined) {
             approved = await ctx.ui.confirm(
@@ -553,6 +601,7 @@ export default function (pi: ExtensionAPI) {
               `Profile "${next.matched.map((m) => m.name).join("+") || "default"}" suggests ${resolved.provider}/${resolved.id} (current: ${current ? `${current.provider}/${current.id}` : "unknown"})`,
             );
             modelDecisions.set(key, approved);
+            persistDecisions(ctx.cwd);
           }
           if (approved) {
             modelSwitchesAccepted++;
@@ -580,11 +629,20 @@ export default function (pi: ExtensionAPI) {
       pi.setThinkingLevel(next.thinkingLevel as Parameters<typeof pi.setThinkingLevel>[0]);
     }
 
-    // ---- Active tools: only restrict when the merged profile set actually specifies a tool list.
-    // An empty union (default / no profile declares `tools`) leaves the current toolset untouched
-    // so a no-match prompt never silently strips bash/edit/write.
+    // ---- Active tools: restrict when the merged profile set specifies a tool list; restore
+    // the session baseline when it doesn't. Previously a restriction persisted into
+    // no-tools turns (a lookup-restricted toolset survived into an unrelated default prompt,
+    // silently leaving edit/write/bash missing). The baseline is captured immediately before
+    // the first restriction, so it reflects the session's real starting toolset.
+    // getActiveTools() verified on ExtensionAPI: dist/types/extensibility/extensions/types.d.ts:734.
     if (next.tools.length > 0) {
+      if (baselineTools === null && typeof pi.getActiveTools === "function") {
+        baselineTools = pi.getActiveTools();
+      }
       await pi.setActiveTools(next.tools);
+    } else if (baselineTools !== null) {
+      await pi.setActiveTools(baselineTools);
+      baselineTools = null;
     }
 
     // ---- Rules injection into system prompt for this agent run ----
@@ -691,7 +749,7 @@ export default function (pi: ExtensionAPI) {
   // ---- Manual override + status ----
   pi.registerCommand("profile", {
     description:
-      "Status/override: /profile [<name>|clear] | list | debug [on|off] | validate | explain <text>",
+      "Status/override: /profile [<name> [--once]|clear] | list | debug [on|off] | validate | explain <text> | stats | rules | telemetry | misroute [expected]",
     handler: async (args, ctx) => {
       const arg = (args ?? "").trim();
       const [sub, ...rest] = arg.split(/\s+/);
@@ -803,6 +861,49 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         ctx.ui.notify(block, "info");
+        return;
+      }
+
+      // ---- /profile telemetry : summarize the routing log for vocabulary tuning ----
+      if (sub === "telemetry") {
+        const logPath = path.join(ctx.cwd, ".profile-router-telemetry.log");
+        if (!fs.existsSync(logPath)) {
+          ctx.ui.notify("No telemetry recorded yet (.profile-router-telemetry.log missing)", "info");
+          return;
+        }
+        type TelemetryRow = { prompt: string; chosenProfile: string; margin: number; runnerUpProfile: string | null };
+        const rows: TelemetryRow[] = [];
+        for (const line of fs.readFileSync(logPath, "utf-8").split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            rows.push(JSON.parse(trimmed) as TelemetryRow);
+          } catch {
+            // Skip corrupt lines — the log is append-only and may interleave across sessions.
+          }
+        }
+        if (rows.length === 0) {
+          ctx.ui.notify("Telemetry log exists but has no readable entries", "info");
+          return;
+        }
+        const counts = new Map<string, number>();
+        for (const r of rows) counts.set(r.chosenProfile, (counts.get(r.chosenProfile) ?? 0) + 1);
+        const lines: string[] = [`Telemetry (${rows.length} route${rows.length === 1 ? "" : "s"} in .profile-router-telemetry.log):`];
+        for (const [name, count] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
+          lines.push(`  ${name}: ${count}`);
+        }
+        const defaultCount = counts.get("default") ?? 0;
+        if (defaultCount > 0) {
+          lines.push(`${defaultCount} default route${defaultCount === 1 ? "" : "s"} — prompts the vocabulary missed; review them for new keywords`);
+        }
+        // Low-margin routes are the ones one stray keyword away from flipping profile.
+        const lowMargin = rows.filter((r) => typeof r.margin === "number" && r.margin <= 1);
+        lines.push(`Low-margin routes (margin <= 1): ${lowMargin.length}`);
+        for (const r of lowMargin.slice(-5)) {
+          const promptPreview = r.prompt.length > 60 ? `${r.prompt.slice(0, 60)}…` : r.prompt;
+          lines.push(`  [${r.margin >= 0 ? "+" : ""}${r.margin}] ${r.chosenProfile}${r.runnerUpProfile ? ` vs ${r.runnerUpProfile}` : ""}: "${promptPreview}"`);
+        }
+        ctx.ui.notify(lines.join("\n"), "info");
         return;
       }
 

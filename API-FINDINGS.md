@@ -373,3 +373,16 @@ optional and independent, but they do different jobs:
 (`MergedConfig | null`) already populated by `before_agent_start` on the
 most recent prompt, so both parameters are prefixed `_event`/`_ctx` and
 unused.
+
+## (g) Toolset enumeration (added 2026-07-17, toolset-restore feature)
+
+**Active-tools read-back**: `pi.getActiveTools(): string[]` — "Get the list of currently
+active tool names" — and `pi.getAllTools(): string[]` — "Get all configured tools (built-in +
+extension tools)" — both on `ExtensionAPI`
+(`dist/types/extensibility/extensions/types.d.ts:734-736`, adjacent to `setActiveTools`
+at `:738`; also surfaced in `extensions/loader.d.ts:22`). This closes the audit's E7 gate:
+the extension captures `getActiveTools()` immediately before its first `setActiveTools`
+restriction of the session and restores that baseline on the next merged-config turn with no
+tool list, so a profile restriction can no longer outlive its matching turns. The call is
+feature-guarded (`typeof pi.getActiveTools === "function"`) so older runtimes degrade to the
+previous leave-untouched behavior.
