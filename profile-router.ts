@@ -746,6 +746,190 @@ export default function (pi: ExtensionAPI) {
     return lines;
   };
 
+  // ---- /profile subcommand dispatch table ----
+  // Each entry is a self-contained, void-returning handler that produces its effect purely
+  // through ctx.ui.notify / file writes / closure-state mutation — the exact bodies moved out
+  // of the former if-chain. The dispatcher (in the command handler below) looks up `sub` here.
+  // NOT in this table, by design: `clear` (matched on the whole arg, checked first), the
+  // `--once` pin, the bare `<name>` pin, and the bare status line — their ordering is
+  // load-bearing (clear first; pin/status as the fall-through default) so they stay inline.
+  type CommandCtx = Parameters<Parameters<ExtensionAPI["registerCommand"]>[1]["handler"]>[1];
+  type SubHandler = (arg: string, rest: string[], sub: string, ctx: CommandCtx) => void | Promise<void>;
+
+  const SUBCOMMANDS: Record<string, SubHandler> = {
+    // ---- /profile list : every profile with its one-line summary ----
+    list: (_arg, _rest, _sub, ctx) => {
+      const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+      if (bundles.profiles.length === 0) {
+        ctx.ui.notify("No profiles loaded (bundles.json missing, empty, or malformed).", "warning");
+        return;
+      }
+      const lines = bundles.profiles.map((p) => {
+        const summary = p.description ?? `keywords: ${p.keywords.join(", ")}`;
+        return `• ${p.name} — ${summary}\n    model: ${modelStr(p.model)} | thinking: ${p.thinkingLevel ?? "unset"}`;
+      });
+      const def = bundles.default
+        ? `\ndefault (no match) → model: ${modelStr(bundles.default.model)} | thinking: ${bundles.default.thinkingLevel ?? "unset"}`
+        : "";
+      ctx.ui.notify(`Profiles (${bundles.profiles.length}):\n${lines.join("\n")}${def}`, "info");
+    },
+
+    // ---- /profile debug [on|off] : toggle the per-request routing trace ----
+    debug: (_arg, rest, _sub, ctx) => {
+      const mode = (rest[0] ?? "").toLowerCase();
+      if (mode === "on") debugTrace = true;
+      else if (mode === "off") debugTrace = false;
+      else debugTrace = !debugTrace; // bare `/profile debug` toggles
+      ctx.ui.notify(
+        `Profile debug trace ${debugTrace ? "ON — each prompt will show why a profile is chosen" : "OFF"}`,
+        "info",
+      );
+    },
+
+    // ---- /profile validate : structural check of bundles.json ----
+    validate: (_arg, _rest, _sub, ctx) => {
+      const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+      const problems = validateBundles(bundles);
+      if (problems.length === 0) {
+        ctx.ui.notify(`✓ bundles.json valid (${bundles.profiles.length} profile${bundles.profiles.length === 1 ? "" : "s"})`, "info");
+      } else {
+        ctx.ui.notify(`✗ bundles.json has ${problems.length} problem${problems.length === 1 ? "" : "s"}:\n${problems.map((p) => `  - ${p}`).join("\n")}`, "warning");
+      }
+    },
+
+    // ---- /profile explain <text> : show routing trace for a prompt without sending it ----
+    explain: (arg, _rest, sub, ctx) => {
+      const text = arg.slice(sub.length).trim();
+      if (!text) {
+        ctx.ui.notify("Usage: /profile explain <prompt text>", "warning");
+        return;
+      }
+      const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+      const rows = explain(text, bundles);
+      const headerText = `🔎 Profile routing for "${text.slice(0, 60)}${text.length > 60 ? "…" : ""}"`;
+      const lines = [headerText, ...formatTraceLines(rows)];
+      ctx.ui.notify(lines.join("\n"), "info");
+    },
+
+    // ---- /profile stats : session counters ----
+    stats: (_arg, _rest, _sub, ctx) => {
+      const hasActivity =
+        promptsClassified.size > 0 || manualPinsSet > 0 || modelSwitchesAccepted > 0 || modelSwitchesDeclined > 0;
+
+      if (!hasActivity) {
+        ctx.ui.notify("no prompts classified yet", "info");
+        return;
+      }
+
+      const lines: string[] = ["Profile stats (this session):"];
+
+      // Build and sort profiles by count descending
+      const profileStats = Array.from(promptsClassified.entries()).sort((a, b) => b[1] - a[1]);
+      for (const [name, count] of profileStats) {
+        lines.push(`  ${name}: ${count}`);
+      }
+
+      lines.push(`Manual pins set: ${manualPinsSet}`);
+      lines.push(`Model switches accepted: ${modelSwitchesAccepted}`);
+      lines.push(`Model switches declined: ${modelSwitchesDeclined}`);
+
+      ctx.ui.notify(lines.join("\n"), "info");
+    },
+
+    // ---- /profile rules : print the exact rules/skills block being injected ----
+    rules: (_arg, _rest, _sub, ctx) => {
+      if (active === null) {
+        ctx.ui.notify("No classification yet — send a prompt first", "info");
+        return;
+      }
+      const block = buildInjectionBlock(active);
+      if (block === null) {
+        ctx.ui.notify(
+          `No rules or skills declared for the active profile (${active.matched.map((m) => m.name).join("+") || "default"})`,
+          "info",
+        );
+        return;
+      }
+      ctx.ui.notify(block, "info");
+    },
+
+    // ---- /profile telemetry : summarize the routing log for vocabulary tuning ----
+    telemetry: (_arg, _rest, _sub, ctx) => {
+      const logPath = path.join(ctx.cwd, ".profile-router-telemetry.log");
+      if (!fs.existsSync(logPath)) {
+        ctx.ui.notify("No telemetry recorded yet (.profile-router-telemetry.log missing)", "info");
+        return;
+      }
+      type TelemetryRow = { prompt: string; chosenProfile: string; margin: number; runnerUpProfile: string | null };
+      const rows: TelemetryRow[] = [];
+      for (const line of fs.readFileSync(logPath, "utf-8").split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          rows.push(JSON.parse(trimmed) as TelemetryRow);
+        } catch {
+          // Skip corrupt lines — the log is append-only and may interleave across sessions.
+        }
+      }
+      if (rows.length === 0) {
+        ctx.ui.notify("Telemetry log exists but has no readable entries", "info");
+        return;
+      }
+      const counts = new Map<string, number>();
+      for (const r of rows) counts.set(r.chosenProfile, (counts.get(r.chosenProfile) ?? 0) + 1);
+      const lines: string[] = [`Telemetry (${rows.length} route${rows.length === 1 ? "" : "s"} in .profile-router-telemetry.log):`];
+      for (const [name, count] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
+        lines.push(`  ${name}: ${count}`);
+      }
+      const defaultCount = counts.get("default") ?? 0;
+      if (defaultCount > 0) {
+        lines.push(`${defaultCount} default route${defaultCount === 1 ? "" : "s"} — prompts the vocabulary missed; review them for new keywords`);
+      }
+      // Low-margin routes are the ones one stray keyword away from flipping profile.
+      const lowMargin = rows.filter((r) => typeof r.margin === "number" && r.margin <= 1);
+      lines.push(`Low-margin routes (margin <= 1): ${lowMargin.length}`);
+      for (const r of lowMargin.slice(-5)) {
+        const promptPreview = r.prompt.length > 60 ? `${r.prompt.slice(0, 60)}…` : r.prompt;
+        lines.push(`  [${r.margin >= 0 ? "+" : ""}${r.margin}] ${r.chosenProfile}${r.runnerUpProfile ? ` vs ${r.runnerUpProfile}` : ""}: "${promptPreview}"`);
+      }
+      ctx.ui.notify(lines.join("\n"), "info");
+    },
+
+    // ---- /profile misroute [expected-profile] : log misclassifications to .omp/misroutes.jsonl ----
+    misroute: (_arg, rest, _sub, ctx) => {
+      if (!lastPrompt) {
+        ctx.ui.notify("nothing to log", "warning");
+        return;
+      }
+      const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
+      const expectedArg = rest.join(" ").trim() || null;
+
+      // Validate expected-profile argument if provided
+      if (expectedArg && !bundles.profiles.some((p) => p.name === expectedArg)) {
+        ctx.ui.notify(
+          `No profile named "${expectedArg}" in bundles.json. Known: ${bundles.profiles.map((p) => p.name).join(", ") || "(none loaded)"}`,
+          "error",
+        );
+        return;
+      }
+
+      // Create .omp directory if needed and append the JSON line
+      const ompDir = path.join(ctx.cwd, ".omp");
+      fs.mkdirSync(ompDir, { recursive: true });
+      const logPath = path.join(ompDir, "misroutes.jsonl");
+
+      const entry = {
+        ts: new Date().toISOString(),
+        prompt: lastPrompt.slice(0, 500),
+        matched: active?.matched.map((m) => m.name) ?? [],
+        expected: expectedArg,
+      };
+
+      fs.appendFileSync(logPath, JSON.stringify(entry) + "\n");
+      ctx.ui.notify(`Logged misroute to ${logPath}`, "info");
+    },
+  };
+
   // ---- Manual override + status ----
   pi.registerCommand("profile", {
     description:
@@ -762,183 +946,13 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // ---- /profile list : every profile with its one-line summary ----
-      if (sub === "list") {
-        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
-        if (bundles.profiles.length === 0) {
-          ctx.ui.notify("No profiles loaded (bundles.json missing, empty, or malformed).", "warning");
-          return;
-        }
-        const lines = bundles.profiles.map((p) => {
-          const summary = p.description ?? `keywords: ${p.keywords.join(", ")}`;
-          return `• ${p.name} — ${summary}\n    model: ${modelStr(p.model)} | thinking: ${p.thinkingLevel ?? "unset"}`;
-        });
-        const def = bundles.default
-          ? `\ndefault (no match) → model: ${modelStr(bundles.default.model)} | thinking: ${bundles.default.thinkingLevel ?? "unset"}`
-          : "";
-        ctx.ui.notify(`Profiles (${bundles.profiles.length}):\n${lines.join("\n")}${def}`, "info");
-        return;
-      }
-
-      // ---- /profile debug [on|off] : toggle the per-request routing trace ----
-      if (sub === "debug") {
-        const mode = (rest[0] ?? "").toLowerCase();
-        if (mode === "on") debugTrace = true;
-        else if (mode === "off") debugTrace = false;
-        else debugTrace = !debugTrace; // bare `/profile debug` toggles
-        ctx.ui.notify(
-          `Profile debug trace ${debugTrace ? "ON — each prompt will show why a profile is chosen" : "OFF"}`,
-          "info",
-        );
-        return;
-      }
-
-      // ---- /profile validate : structural check of bundles.json ----
-      if (sub === "validate") {
-        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
-        const problems = validateBundles(bundles);
-        if (problems.length === 0) {
-          ctx.ui.notify(`✓ bundles.json valid (${bundles.profiles.length} profile${bundles.profiles.length === 1 ? "" : "s"})`, "info");
-        } else {
-          ctx.ui.notify(`✗ bundles.json has ${problems.length} problem${problems.length === 1 ? "" : "s"}:\n${problems.map((p) => `  - ${p}`).join("\n")}`, "warning");
-        }
-        return;
-      }
-
-      // ---- /profile explain <text> : show routing trace for a prompt without sending it ----
-      if (sub === "explain") {
-        const text = arg.slice(sub.length).trim();
-        if (!text) {
-          ctx.ui.notify("Usage: /profile explain <prompt text>", "warning");
-          return;
-        }
-        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
-        const rows = explain(text, bundles);
-        const headerText = `🔎 Profile routing for "${text.slice(0, 60)}${text.length > 60 ? "…" : ""}"`;
-        const lines = [headerText, ...formatTraceLines(rows)];
-        ctx.ui.notify(lines.join("\n"), "info");
-        return;
-      }
-
-      // ---- /profile stats : session counters ----
-      if (sub === "stats") {
-        const hasActivity =
-          promptsClassified.size > 0 || manualPinsSet > 0 || modelSwitchesAccepted > 0 || modelSwitchesDeclined > 0;
-
-        if (!hasActivity) {
-          ctx.ui.notify("no prompts classified yet", "info");
-          return;
-        }
-
-        const lines: string[] = ["Profile stats (this session):"];
-
-        // Build and sort profiles by count descending
-        const profileStats = Array.from(promptsClassified.entries()).sort((a, b) => b[1] - a[1]);
-        for (const [name, count] of profileStats) {
-          lines.push(`  ${name}: ${count}`);
-        }
-
-        lines.push(`Manual pins set: ${manualPinsSet}`);
-        lines.push(`Model switches accepted: ${modelSwitchesAccepted}`);
-        lines.push(`Model switches declined: ${modelSwitchesDeclined}`);
-
-        ctx.ui.notify(lines.join("\n"), "info");
-        return;
-      }
-
-      // ---- /profile rules : print the exact rules/skills block being injected ----
-      if (sub === "rules") {
-        if (active === null) {
-          ctx.ui.notify("No classification yet — send a prompt first", "info");
-          return;
-        }
-        const block = buildInjectionBlock(active);
-        if (block === null) {
-          ctx.ui.notify(
-            `No rules or skills declared for the active profile (${active.matched.map((m) => m.name).join("+") || "default"})`,
-            "info",
-          );
-          return;
-        }
-        ctx.ui.notify(block, "info");
-        return;
-      }
-
-      // ---- /profile telemetry : summarize the routing log for vocabulary tuning ----
-      if (sub === "telemetry") {
-        const logPath = path.join(ctx.cwd, ".profile-router-telemetry.log");
-        if (!fs.existsSync(logPath)) {
-          ctx.ui.notify("No telemetry recorded yet (.profile-router-telemetry.log missing)", "info");
-          return;
-        }
-        type TelemetryRow = { prompt: string; chosenProfile: string; margin: number; runnerUpProfile: string | null };
-        const rows: TelemetryRow[] = [];
-        for (const line of fs.readFileSync(logPath, "utf-8").split("\n")) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            rows.push(JSON.parse(trimmed) as TelemetryRow);
-          } catch {
-            // Skip corrupt lines — the log is append-only and may interleave across sessions.
-          }
-        }
-        if (rows.length === 0) {
-          ctx.ui.notify("Telemetry log exists but has no readable entries", "info");
-          return;
-        }
-        const counts = new Map<string, number>();
-        for (const r of rows) counts.set(r.chosenProfile, (counts.get(r.chosenProfile) ?? 0) + 1);
-        const lines: string[] = [`Telemetry (${rows.length} route${rows.length === 1 ? "" : "s"} in .profile-router-telemetry.log):`];
-        for (const [name, count] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
-          lines.push(`  ${name}: ${count}`);
-        }
-        const defaultCount = counts.get("default") ?? 0;
-        if (defaultCount > 0) {
-          lines.push(`${defaultCount} default route${defaultCount === 1 ? "" : "s"} — prompts the vocabulary missed; review them for new keywords`);
-        }
-        // Low-margin routes are the ones one stray keyword away from flipping profile.
-        const lowMargin = rows.filter((r) => typeof r.margin === "number" && r.margin <= 1);
-        lines.push(`Low-margin routes (margin <= 1): ${lowMargin.length}`);
-        for (const r of lowMargin.slice(-5)) {
-          const promptPreview = r.prompt.length > 60 ? `${r.prompt.slice(0, 60)}…` : r.prompt;
-          lines.push(`  [${r.margin >= 0 ? "+" : ""}${r.margin}] ${r.chosenProfile}${r.runnerUpProfile ? ` vs ${r.runnerUpProfile}` : ""}: "${promptPreview}"`);
-        }
-        ctx.ui.notify(lines.join("\n"), "info");
-        return;
-      }
-
-      // ---- /profile misroute [expected-profile] : log misclassifications to .omp/misroutes.jsonl ----
-      if (sub === "misroute") {
-        if (!lastPrompt) {
-          ctx.ui.notify("nothing to log", "warning");
-          return;
-        }
-        const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
-        const expectedArg = rest.join(" ").trim() || null;
-
-        // Validate expected-profile argument if provided
-        if (expectedArg && !bundles.profiles.some((p) => p.name === expectedArg)) {
-          ctx.ui.notify(
-            `No profile named "${expectedArg}" in bundles.json. Known: ${bundles.profiles.map((p) => p.name).join(", ") || "(none loaded)"}`,
-            "error",
-          );
-          return;
-        }
-
-        // Create .omp directory if needed and append the JSON line
-        const ompDir = path.join(ctx.cwd, ".omp");
-        fs.mkdirSync(ompDir, { recursive: true });
-        const logPath = path.join(ompDir, "misroutes.jsonl");
-
-        const entry = {
-          ts: new Date().toISOString(),
-          prompt: lastPrompt.slice(0, 500),
-          matched: active?.matched.map((m) => m.name) ?? [],
-          expected: expectedArg,
-        };
-
-        fs.appendFileSync(logPath, JSON.stringify(entry) + "\n");
-        ctx.ui.notify(`Logged misroute to ${logPath}`, "info");
+      // ---- Named subcommands (list/debug/validate/explain/stats/rules/telemetry/misroute) ----
+      // Checked before the --once regex and the <name> pin, so a subcommand name shadows an
+      // identically-named profile — matching the original if-chain's ordering exactly.
+      const subKey = sub ?? "";
+      const subHandler = SUBCOMMANDS[subKey];
+      if (subHandler) {
+        await subHandler(arg, rest, subKey, ctx);
         return;
       }
 
