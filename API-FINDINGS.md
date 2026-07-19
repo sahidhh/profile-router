@@ -386,3 +386,35 @@ restriction of the session and restores that baseline on the next merged-config 
 tool list, so a profile restriction can no longer outlive its matching turns. The call is
 feature-guarded (`typeof pi.getActiveTools === "function"`) so older runtimes degrade to the
 previous leave-untouched behavior.
+
+## (h) `<skills>` is inside `systemPrompt[0]`, not its own element (added 2026-07-19, D-F1 gate)
+
+**Purpose**: this section documents an API the extension deliberately does **not** call — it
+records the D-F1 gate verification that proved profile-driven skills *filtering* is not feasible
+against this pin (see `DECISIONS.md` Phase 18).
+
+**`buildSystemPrompt` return shape**: `BuildSystemPromptResult = { systemPrompt: string[] }`,
+where entries are "Ordered system prompt blocks. Providers should preserve entries as distinct
+messages/blocks." (`src/system-prompt.ts:507-510`).
+
+**Array construction** (`src/system-prompt.ts:789-803`):
+- `const rendered = prompt.render(systemPromptTemplate, data)` then `const systemPrompt = [rendered]`.
+  `data.skills = filteredSkills` (`:767`) is one field among tools/rules/environment fed into
+  the *single* template render — so `<skills>` is embedded in element 0, not isolated.
+- `systemPrompt.push(projectPrompt)` (`:796-798`) and optional `push(activeRepoContextPrompt)`
+  (`:799-801`) add elements 1..n. Net array: `[rendered, projectPrompt, activeRepoContext?]`.
+- `<skills>…</skills>` markup is in the main template, iterated with `{{#each skills}}`
+  (`src/prompts/system/system-prompt.md:27-33`).
+
+**Same array reaches the hook**: `#baseSystemPrompt` ← `built.systemPrompt`
+(`src/session/agent-session.ts:6460,6547`); returned by `#buildSystemPromptForAgentStart`
+(`:6566-6603`); passed as `beforeAgentStartSystemPrompt` into `emitBeforeAgentStart(...)`
+(`:7803-7811`) → the extension's `event.systemPrompt`.
+
+**No skills-restriction API**: no `setActiveSkills`/`restrictSkills` on `ExtensionAPI`. The only
+skills-adjacent extension surface is `ResourcesDiscoverResult.skillPaths?: string[]` — additive,
+fired at `startup`/`reload` only (`dist/types/extensibility/extensions/types.d.ts:355-366`).
+
+**Version-bump trigger**: if a future release splits `<skills>` into its own `systemPrompt[]`
+element, or adds a skills-restriction API, D-F1 becomes feasible — re-check these anchors on any
+bump (see `docs/omp-version-bump.md`).

@@ -583,6 +583,9 @@ D-F1. **Profile-driven `<skills>` filtering (verify before building).** The
     that observed fact, not the inference. If never scheduled, the inference
     stays as-is: harmless, no cost. (Currently a no-op here anyway — `lookup`
     ships `skills: []`; see BLOCKERS / T06b.)
+    **UPDATE (Phase 18, 2026-07-19): the gate was run and the inference is FALSIFIED.
+    The `<skills>` block is NOT a distinct element of `systemPrompt[]` — it is rendered
+    inside element 0. Feature not feasible against the pinned API. See Phase 18 below.**
 
 D-F2. **lookup+investigation co-match blends two read-only profiles** (2026-07-15).
 Observed live: "explain this repo" scores lookup 3 [explain, repo] over
@@ -647,3 +650,46 @@ sample carried two at once. All profiles (and default.rules) now share one canon
 before falling back to plain grep or bulk reads." Dedup now collapses it to one injected line
 on any co-match. Not done via `suppresses` — D-F2 forbade suppression-based fixes, and this is
 text unification, not tag negation.
+
+## Phase 18 — D-F1 gate RUN: `<skills>` filtering is NOT feasible against the pinned API (2026-07-19)
+
+**Gate disposition.** D-F1's gate required, before any build, a one-time read of the shipped
+`buildSystemPrompt` to CONFIRM the rendered `<skills>` block is genuinely an element of the
+`systemPrompt: string[]` the `before_agent_start` hook receives — not concatenated into a
+larger string. The pinned package (`@oh-my-pi/pi-coding-agent@16.4.1`) ships full TypeScript
+source under `src/`, so this was verified against behavior, not just `.d.ts`.
+
+**Finding: the inference is FALSIFIED.** The `<skills>` block is rendered *inside* element 0 of
+the array, not as its own element:
+- `buildSystemPrompt` returns `{ systemPrompt: string[] }` where
+  `systemPrompt[0] = prompt.render(systemPromptTemplate, data)` — one monolithic string — and
+  `data.skills = filteredSkills` is fed into that template (`src/system-prompt.ts:789-790`,
+  data assembled `:753-788`). Later pushes add `projectPrompt` (`:796-798`) and an optional
+  `activeRepoContextPrompt` (`:799-801`) as elements 1..n. So the array is
+  `[rendered(includes tools+rules+skills+env+guidelines), projectPrompt, activeRepoContext?]`.
+- The `<skills>…</skills>` markup lives in the main template
+  (`src/prompts/system/system-prompt.md:27-33`, `{{#each skills}}`), i.e. embedded in element 0.
+- This is the same array the hook sees: `#baseSystemPrompt` is set from the `buildSystemPrompt`
+  result (`src/session/agent-session.ts:6460,6547`); `#buildSystemPromptForAgentStart` returns
+  it (`:6566-6603`); it is passed to `emitBeforeAgentStart(text, images, beforeAgentStartSystemPrompt)`
+  (`:7807-7811`) → becomes `event.systemPrompt`.
+
+**Consequence: the hook cannot filter skills per profile.** Dropping/replacing an array element
+cannot remove `<skills>` because it is not a separate element. The only hook-layer option is
+regex string-surgery on element 0, which is REJECTED: (a) brittle — coupled to template markup;
+(b) **cosmetic and misleading** — it removes only the prompt's *advertisement* of skills, not the
+agent's ability to invoke them. Skills are loaded/enabled upstream (`loadSkills` /
+`filteredSkills`, `src/system-prompt.ts:626-737`) and remain invokable via the Skill tool,
+`skill://`, and `/skill:<name>` regardless of prompt text.
+
+**No alternative API seam exists in the pin.** There is no `setActiveSkills`/`restrictSkills`
+on `ExtensionAPI` (no analog to `setActiveTools`). The `resources_discover` event only lets an
+extension *add* `skillPaths` and is session-scoped (`startup`/`reload`), not per-prompt
+filtering (`dist/types/extensibility/extensions/types.d.ts:355-366`).
+
+**Disposition: D-F1 CLOSED as won't-build (not feasible), not deferred.** The existing additive
+"## Recommended Skills" advisory injected by `buildInjectionBlock` remains the honest, working
+mechanism — it *recommends*, it does not *hide*. Revisit ONLY if a future OMP version either
+splits the `<skills>` block into its own `systemPrompt[]` element or exposes a skills-restriction
+API; that is a version-bump trigger, tracked in `docs/omp-version-bump.md`. Evidence for these
+anchors is recorded in `API-FINDINGS.md` §(h).
