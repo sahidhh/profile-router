@@ -68,6 +68,9 @@ export interface MergedConfig {
 
 const DEBUG = process.env.PROFILE_ROUTER_DEBUG === "1";
 
+/** Rotate the telemetry log past this size (~1 MiB ≈ tens of thousands of routes). */
+const TELEMETRY_MAX_BYTES = 1_048_576;
+
 // ---------- Config loading (project-local overrides global) ----------
 
 /** Tracks whether we've already warned about a malformed/missing config this process, per path. */
@@ -181,6 +184,20 @@ function isStickyContinuation(text: string): boolean {
   return trimmed.split(/\s+/).length < 6;
 }
 
+/**
+ * Verbs that mean "change something", used to stop a read-only profile from being
+ * inherited into a turn that plainly wants to act. Deliberately does NOT include
+ * bare continuations ("ok", "continue", "go on", "next") — those SHOULD inherit.
+ */
+const ACTION_VERBS = [
+  "fix", "change", "add", "remove", "delete", "update", "edit", "write",
+  "rename", "refactor", "patch", "apply", "revert", "implement", "install", "create",
+];
+
+function hasActionVerb(text: string): boolean {
+  return ACTION_VERBS.some((v) => wordBoundaryTest(text, v));
+}
+
 export function classify(
   prompt: string,
   bundles: Bundles,
@@ -200,7 +217,13 @@ export function classify(
 
   if (hits.length === 0 && prevProfileName) {
     const prevProfile = bundles.profiles.find((p) => p.name === prevProfileName);
-    if (prevProfile && isStickyContinuation(text)) {
+    // A read-only profile must not be inherited into a turn that asks for a change.
+    // "now fix it" after a `lookup` turn used to inherit lookup's restricted toolset
+    // (no edit/write/bash), its blocked subagents, and its micro model — producing a
+    // refusal or a failed edit instead of work. Falling through to `default` gives the
+    // turn a full toolset; a genuine continuation ("ok", "continue") still inherits.
+    const wantsToAct = prevProfile?.capabilities?.write === false && hasActionVerb(text);
+    if (prevProfile && isStickyContinuation(text) && !wantsToAct) {
       return [{ profile: prevProfile, score: 0, inherited: true }];
     }
   }
@@ -397,6 +420,30 @@ export function validateBundles(bundles: Bundles): string[] {
   return problems;
 }
 
+// ---------- Cost comparison (decides which model switches need a confirm) ----------
+
+/** The pricing slice of a catalog Model: $/million tokens (pi-catalog `types.ts` `Model.cost`). */
+type ModelCost = { input: number; output: number } | undefined;
+
+/**
+ * True only when `to` is unambiguously cheaper than `from` — strictly cheaper on BOTH
+ * the input and output axes, with real (non-zero) prices on both sides.
+ *
+ * The confirm dialog exists to prevent surprise SPEND, so a switch that can only save
+ * money does not need to interrupt the user. But that reasoning holds only when the
+ * saving is certain: many catalog entries carry cost 0 meaning "unknown/unpriced", not
+ * "free", and treating those as cheap would auto-apply switches to models of unknown
+ * price. Anything ambiguous — missing cost, a zero on either side, cheaper on one axis
+ * but dearer on the other — returns false and falls through to the normal confirm.
+ */
+export function isStrictDowngrade(from: ModelCost, to: ModelCost): boolean {
+  if (!from || !to) return false;
+  const known = (c: { input: number; output: number }) =>
+    typeof c.input === "number" && typeof c.output === "number" && c.input > 0 && c.output > 0;
+  if (!known(from) || !known(to)) return false;
+  return to.input < from.input && to.output < from.output;
+}
+
 // ---------- Extension ----------
 
 export default function (pi: ExtensionAPI) {
@@ -411,6 +458,7 @@ export default function (pi: ExtensionAPI) {
   let manualPinsSet = 0;
   let modelSwitchesAccepted = 0;
   let modelSwitchesDeclined = 0;
+  let modelSwitchesAuto = 0;                       // downgrades applied without a confirm
   let lastConfigHash: string | null = null;       // content hash from the most recent bundles.json load this session
   let stickyPrevProfile: string | null = null;    // last active profile name, for stickiness inheritance; reset on explicit /profile pin/clear or new session
   let baselineTools: string[] | null = null;      // toolset captured before the first profile restriction this session, restored on no-tools turns
@@ -450,14 +498,22 @@ export default function (pi: ExtensionAPI) {
 
   /**
    * Log a telemetry entry for this routing decision to .profile-router-telemetry.log.
-   * Appends one line per route (never truncates).
-   * Format: JSON-lines with timestamp, truncated prompt, chosen profile, margin, runner-up name.
+   * Appends one line per route.
+   * Format: JSON-lines with timestamp, truncated prompt, chosen profile, margin, runner-up
+   * name, and the model + thinking level the turn actually ran on.
+   *
+   * `model`/`thinkingLevel` are what makes the log answer "where did the money go" rather
+   * than only "was the routing right" — a profile's declared model is not what it ran on
+   * when the chain fell through, the user declined, or nothing resolved. Older rows lack
+   * both fields; the reader treats them as unknown rather than discarding them.
    */
   const logTelemetry = (
     cwd: string,
     prompt: string,
     chosenProfileName: string,
     explain_rows: ReturnType<typeof explain>,
+    appliedModel: string | null,
+    thinkingLevel: string | null,
   ) => {
     try {
       // Find the chosen profile's score and runner-up in the full explain ranking.
@@ -481,9 +537,23 @@ export default function (pi: ExtensionAPI) {
         chosenProfile: chosenProfileName,
         margin,
         runnerUpProfile: runnerUpName,
+        model: appliedModel,
+        thinkingLevel,
       };
 
       const logPath = path.join(cwd, ".profile-router-telemetry.log");
+
+      // Rotate before appending so the log can't grow without bound in a long-lived
+      // project. One generation is kept (.1, overwritten) — this is tuning data, not an
+      // audit trail, and the summary only ever reads the current file.
+      try {
+        if (fs.statSync(logPath).size > TELEMETRY_MAX_BYTES) {
+          fs.renameSync(logPath, `${logPath}.1`);
+        }
+      } catch {
+        // No log yet (or stat/rename refused) — nothing to rotate; the append below creates it.
+      }
+
       fs.appendFileSync(logPath, JSON.stringify(logEntry) + "\n", "utf-8");
     } catch (err) {
       debugLog("telemetry write failed", { error: (err as Error).message });
@@ -548,10 +618,6 @@ export default function (pi: ExtensionAPI) {
 
     debugLog("classified", { prompt: event.prompt.slice(0, 80), matched: next.matched });
 
-    // ---- Telemetry: log every routing decision, including default (no-match) routes.
-    // Default rows are the prompts the vocabulary missed — the highest-value tuning data.
-    logTelemetry(ctx.cwd, event.prompt, next.matched[0]?.name ?? "default", explainRows());
-
     // ---- Debug trace: explain WHY this prompt routed where it did (toggled via /profile debug) ----
     if (debugTrace) {
       const lines: string[] = [`🔎 Profile routing for "${event.prompt.slice(0, 60)}${event.prompt.length > 60 ? "…" : ""}"`];
@@ -576,51 +642,109 @@ export default function (pi: ExtensionAPI) {
     );
 
     // ---- Model routing: suggest + confirm, only on actual change ----
-    // `model` may be a fallback chain (["openrouter/...", "anthropic/..."]) —
-    // the first spec that resolves against a credentialed provider wins.
+    // `model` may be a fallback chain (["deepseek/...", "anthropic/..."]) — the chain
+    // advances past any spec that fails to resolve or that has no credentials.
+    // `appliedModel` records what the turn ACTUALLY ran on, for telemetry below: the
+    // declared chain is not the answer when it fell through or the user declined.
+    let appliedModel: string | null = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null;
     if (next.model) {
-      let resolved: ReturnType<typeof ctx.models.resolve>;
-      let resolvedSpec: string | undefined;
+      const current = ctx.model;
+      const profileNames = next.matched.map((m) => m.name).join("+") || "default";
+      loadPersistedDecisions(ctx.cwd);
+
+      // Walk the chain to the first spec that BOTH resolves against the catalog and
+      // actually applies. Previously the loop broke on the first catalog-resolvable
+      // spec and then called setModel once — but resolve() is catalog/alias-only and
+      // never checks credentials (API-FINDINGS.md §"model"), so an uncredentialed
+      // first link ended the chain with a warning and left the session on whatever
+      // model it was already using. When that ambient model is the premium one, the
+      // cheap profile silently bills at premium rates. A false from setModel now
+      // advances to the next link instead of terminating the chain.
+      let settled = false;                      // switch applied, already correct, or user said no
+      const uncredentialed: string[] = [];      // resolved but setModel refused (no API key)
+
       for (const spec of next.model) {
-        resolved = ctx.models.resolve(spec);
-        if (resolved) {
-          resolvedSpec = spec;
+        const resolved = ctx.models.resolve(spec);
+        if (!resolved) continue;
+
+        const changed = !current || resolved.id !== current.id || resolved.provider !== current.provider;
+        if (!changed) {
+          settled = true; // already on this model — nothing to switch, chain ends here
           break;
         }
-      }
-      const current = ctx.model;
-      if (resolved) {
-        const changed = !current || resolved.id !== current.id || resolved.provider !== current.provider;
-        if (changed) {
-          const key = `${current ? `${current.provider}/${current.id}` : "?"}→${resolved.provider}/${resolved.id}`;
-          loadPersistedDecisions(ctx.cwd);
-          let approved = modelDecisions.get(key);
-          if (approved === undefined) {
+
+        const key = `${current ? `${current.provider}/${current.id}` : "?"}→${resolved.provider}/${resolved.id}`;
+
+        // A switch that can only save money is not a surprise-spend risk, so it applies
+        // without a dialog — and deliberately ignores any remembered answer for this pair.
+        // A single stray "no" used to disable a downgrade permanently and invisibly, which
+        // is the expensive failure mode: the session just keeps paying the higher rate.
+        // Announced (not silent) so the change is still visible in the transcript.
+        const downgrade = isStrictDowngrade(
+          (current as { cost?: { input: number; output: number } } | undefined)?.cost,
+          (resolved as { cost?: { input: number; output: number } }).cost,
+        );
+
+        let approved: boolean;
+        if (downgrade) {
+          approved = true;
+        } else {
+          const remembered = modelDecisions.get(key);
+          if (remembered === undefined) {
             approved = await ctx.ui.confirm(
               "Switch model?",
-              `Profile "${next.matched.map((m) => m.name).join("+") || "default"}" suggests ${resolved.provider}/${resolved.id} (current: ${current ? `${current.provider}/${current.id}` : "unknown"})`,
+              `Profile "${profileNames}" suggests ${resolved.provider}/${resolved.id} (current: ${current ? `${current.provider}/${current.id}` : "unknown"})`,
             );
             modelDecisions.set(key, approved);
             persistDecisions(ctx.cwd);
-          }
-          if (approved) {
-            modelSwitchesAccepted++;
-            const ok = await pi.setModel(resolved);
-            if (!ok) {
-              ctx.ui.notify(`No credentials available for ${resolved.provider}/${resolved.id} — run /model ${resolvedSpec} manually`, "warning");
-            }
           } else {
-            modelSwitchesDeclined++;
+            approved = remembered;
           }
         }
-      } else {
+        if (!approved) {
+          // A decline means "stay where I am", not "try something cheaper" — the
+          // chain stops rather than walking on to the next candidate.
+          modelSwitchesDeclined++;
+          settled = true;
+          break;
+        }
+
+        if (await pi.setModel(resolved)) {
+          appliedModel = `${resolved.provider}/${resolved.id}`;
+          if (downgrade) {
+            modelSwitchesAuto++;
+            ctx.ui.notify(
+              `Model → ${resolved.provider}/${resolved.id} for "${profileNames}" (cheaper than ${current!.provider}/${current!.id}; applied without asking)`,
+              "info",
+            );
+          } else {
+            modelSwitchesAccepted++;
+          }
+          settled = true;
+          break;
+        }
+
+        // Missing credentials is an environment fact, not a user decision — forget the
+        // remembered answer so a credentialed session asks again instead of inheriting
+        // an approval that never took effect.
+        modelDecisions.delete(key);
+        persistDecisions(ctx.cwd);
+        uncredentialed.push(`${resolved.provider}/${resolved.id}`);
+      }
+
+      if (!settled) {
         const warnKey = next.model.join(", ");
         if (!unresolvedModelWarned.has(warnKey)) {
           unresolvedModelWarned.add(warnKey);
-          const profileNames = next.matched.map((m) => m.name).join("+") || "default";
-          ctx.ui.notify(`Profile "${profileNames}" references model${next.model.length > 1 ? "s" : ""} "${warnKey}" — none could be resolved, continuing with the current model`, "warning");
+          const detail = uncredentialed.length
+            ? `no credentials for ${uncredentialed.join(", ")}`
+            : "none could be resolved";
+          ctx.ui.notify(
+            `Profile "${profileNames}" references model${next.model.length > 1 ? "s" : ""} "${warnKey}" — ${detail}, continuing with the current model${current ? ` (${current.provider}/${current.id})` : ""}`,
+            "warning",
+          );
         }
-        debugLog("model not resolvable", { model: warnKey });
+        debugLog("model chain exhausted", { model: warnKey, uncredentialed });
       }
     }
 
@@ -628,6 +752,19 @@ export default function (pi: ExtensionAPI) {
     if (next.thinkingLevel) {
       pi.setThinkingLevel(next.thinkingLevel as Parameters<typeof pi.setThinkingLevel>[0]);
     }
+
+    // ---- Telemetry: log every routing decision, including default (no-match) routes.
+    // Default rows are the prompts the vocabulary missed — the highest-value tuning data.
+    // Logged AFTER model/thinking are applied so the row records what the turn actually
+    // ran on, not what the profile merely asked for.
+    logTelemetry(
+      ctx.cwd,
+      event.prompt,
+      next.matched[0]?.name ?? "default",
+      explainRows(),
+      appliedModel,
+      next.thinkingLevel ?? null,
+    );
 
     // ---- Active tools: restrict when the merged profile set specifies a tool list; restore
     // the session baseline when it doesn't. Previously a restriction persisted into
@@ -814,7 +951,11 @@ export default function (pi: ExtensionAPI) {
     // ---- /profile stats : session counters ----
     stats: (_arg, _rest, _sub, ctx) => {
       const hasActivity =
-        promptsClassified.size > 0 || manualPinsSet > 0 || modelSwitchesAccepted > 0 || modelSwitchesDeclined > 0;
+        promptsClassified.size > 0 ||
+        manualPinsSet > 0 ||
+        modelSwitchesAccepted > 0 ||
+        modelSwitchesDeclined > 0 ||
+        modelSwitchesAuto > 0;
 
       if (!hasActivity) {
         ctx.ui.notify("no prompts classified yet", "info");
@@ -832,7 +973,36 @@ export default function (pi: ExtensionAPI) {
       lines.push(`Manual pins set: ${manualPinsSet}`);
       lines.push(`Model switches accepted: ${modelSwitchesAccepted}`);
       lines.push(`Model switches declined: ${modelSwitchesDeclined}`);
+      lines.push(`Model downgrades auto-applied (no confirm): ${modelSwitchesAuto}`);
 
+      ctx.ui.notify(lines.join("\n"), "info");
+    },
+
+    // ---- /profile decisions [reset] : inspect or clear remembered model-switch answers ----
+    // Remembered answers are otherwise invisible: a switch you once declined simply stops
+    // being offered, with nothing in the UI to say why. This makes the map inspectable and
+    // resettable without hand-editing .omp/model-decisions.json.
+    decisions: (_arg, rest, _sub, ctx) => {
+      loadPersistedDecisions(ctx.cwd);
+      if ((rest[0] ?? "").toLowerCase() === "reset") {
+        const cleared = modelDecisions.size;
+        modelDecisions.clear();
+        persistDecisions(ctx.cwd);
+        ctx.ui.notify(
+          `Cleared ${cleared} remembered model decision${cleared === 1 ? "" : "s"} — the next switch will ask again`,
+          "info",
+        );
+        return;
+      }
+      if (modelDecisions.size === 0) {
+        ctx.ui.notify("No remembered model decisions yet (they persist in .omp/model-decisions.json)", "info");
+        return;
+      }
+      const lines = [`Remembered model decisions (${modelDecisions.size}) — /profile decisions reset to clear:`];
+      for (const [key, approved] of modelDecisions) {
+        lines.push(`  ${approved ? "✓ accept" : "✗ decline"}  ${key}`);
+      }
+      lines.push("Downgrades (strictly cheaper on both input and output) bypass this map and apply automatically.");
       ctx.ui.notify(lines.join("\n"), "info");
     },
 
@@ -860,7 +1030,14 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("No telemetry recorded yet (.profile-router-telemetry.log missing)", "info");
         return;
       }
-      type TelemetryRow = { prompt: string; chosenProfile: string; margin: number; runnerUpProfile: string | null };
+      type TelemetryRow = {
+        prompt: string;
+        chosenProfile: string;
+        margin: number;
+        runnerUpProfile: string | null;
+        model?: string | null;
+        thinkingLevel?: string | null;
+      };
       const rows: TelemetryRow[] = [];
       for (const line of fs.readFileSync(logPath, "utf-8").split("\n")) {
         const trimmed = line.trim();
@@ -881,6 +1058,20 @@ export default function (pi: ExtensionAPI) {
       for (const [name, count] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
         lines.push(`  ${name}: ${count}`);
       }
+      // Routes-by-model: the spend view. Profile counts say whether routing was right;
+      // this says what it cost. Rows predating the `model` field count as "unrecorded"
+      // rather than being dropped, so an upgraded log still summarises cleanly.
+      const modelCounts = new Map<string, number>();
+      for (const r of rows) {
+        const m = r.model ?? "(unrecorded)";
+        modelCounts.set(m, (modelCounts.get(m) ?? 0) + 1);
+      }
+      lines.push("Routes by model:");
+      for (const [model, count] of [...modelCounts.entries()].sort((a, b) => b[1] - a[1])) {
+        const pct = Math.round((count / rows.length) * 100);
+        lines.push(`  ${model}: ${count} (${pct}%)`);
+      }
+
       const defaultCount = counts.get("default") ?? 0;
       if (defaultCount > 0) {
         lines.push(`${defaultCount} default route${defaultCount === 1 ? "" : "s"} — prompts the vocabulary missed; review them for new keywords`);
@@ -933,7 +1124,7 @@ export default function (pi: ExtensionAPI) {
   // ---- Manual override + status ----
   pi.registerCommand("profile", {
     description:
-      "Status/override: /profile [<name> [--once]|clear] | list | debug [on|off] | validate | explain <text> | stats | rules | telemetry | misroute [expected]",
+      "Status/override: /profile [<name> [--once]|clear] | list | debug [on|off] | validate | explain <text> | stats | rules | telemetry | decisions [reset] | misroute [expected]",
     handler: async (args, ctx) => {
       const arg = (args ?? "").trim();
       const [sub, ...rest] = arg.split(/\s+/);

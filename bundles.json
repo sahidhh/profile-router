@@ -199,14 +199,23 @@
         "invariant",
         "secret",
         "credential",
-        "token",
+        "auth token",
+        "api token",
+        "access token",
         "password",
+        "identity-matching"
+      ],
+      "scopes": [
         "api key",
+        "private key",
+        "connection string",
+        "schema migration",
+        "database migration",
         "force-push",
         "reset --hard",
-        "identity-matching",
         "branch deletion"
       ],
+      "minScore": 2,
       "capabilities": { "read": true, "write": true, "execute": true },
       "suppresses": ["readonly-scope"],
       "rules": [
@@ -279,7 +288,9 @@
         "task"
       ],
       "model": [
-        "deepseek/deepseek-v4-flash"
+        "deepseek/deepseek-v4-flash",
+        "google/gemini-2.5-flash-lite",
+        "anthropic/claude-sonnet-5"
       ],
       "thinkingLevel": "low"
     },
@@ -293,6 +304,7 @@
         "lookup",
         "where is",
         "what is",
+        "how many",
         "show me",
         "list files",
         "how does",
@@ -347,7 +359,9 @@
         "task"
       ],
       "model": [
-        "google/gemini-2.5-flash-lite"
+        "google/gemini-2.5-flash-lite",
+        "deepseek/deepseek-v4-flash",
+        "anthropic/claude-sonnet-5"
       ],
       "thinkingLevel": "low"
     }
