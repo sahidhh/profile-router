@@ -106,13 +106,22 @@ overwrites it silently, with no merge and no prompt.
     {
       "name": "unique-name",       // shown in status line and /profile
       "description": "one-liner",  // optional; human summary shown by /profile list (never affects routing)
-      "keywords": ["..."],         // word-boundary, case-insensitive; multi-word phrases OK ("root cause")
+      "keywords": ["..."],         // word-boundary, case-insensitive; multi-word phrases OK ("root cause") — weight 1
+      "verbs": ["..."],            // optional; weak intent signal — weight 1
+      "scopes": ["..."],           // optional; strong breadth/topic signal — weight 2
+      "excludeKeywords": ["..."],  // optional; any hit disqualifies the profile outright
+      "minScore": 1,               // optional; qualifying threshold (default 1). Raise it so a profile
+                                   // needs corroborating signal — premium uses 2 so one bare noun
+                                   // ("schema") can't route a cheap question to Opus.
       "rules": ["..."],            // terse imperatives, injected into system prompt
       "skills": ["..."],           // informational — surfaced as a "Recommended Skills" hint block
       "tools": ["..."],            // active toolset when this profile (or the union of matches) is non-empty
       "disabledAgents": ["..."],   // subagent names to block via the `task` tool's `agent` param
-      "model": "provider/id",      // or a fallback chain: ["openrouter/x", "anthropic/y"] — first spec
-                                   // that resolves against a credentialed provider wins (ctx.models.resolve())
+      "model": "provider/id",      // or a fallback chain: ["deepseek/x", "anthropic/y"] — the chain
+                                   // advances past any spec that fails ctx.models.resolve() (not in the
+                                   // catalog) OR that pi.setModel() refuses for missing credentials;
+                                   // the first spec that actually applies wins. Native ids only —
+                                   // "openrouter/*" prefixes are not catalog entries (DECISIONS #29).
       "thinkingLevel": "low|medium|high"
     }
   ]
@@ -147,25 +156,39 @@ mission's hard constraints):
 one profile (`lookup`) that salvage didn't directly supply — see
 `DECISIONS.md` for why.
 
-Every tier except `premium` ships an **OpenRouter-first fallback chain**:
-a cheaper OpenRouter-routed model as primary, with the previous model as
-fallback (used automatically when OpenRouter isn't credentialed).
+Every tier except `premium` ships a **cheap-first fallback chain**: a
+cheap native-provider primary, ending in a model that is reliably
+credentialed. Model strings use **native provider ids, not `openrouter/*`
+prefixes** — see DECISIONS #29/#30: the `openrouter/*` forms are absent
+from the installed pi-catalog and fail `resolve()` outright. Users
+holding only an OpenRouter key still reach these models through
+OpenRouter's proxy at runtime, under the same `provider/id` strings.
 
 | Profile | Salvage source | Model chain (primary → fallback), thinking | Why |
 |---|---|---|---|
-| `lookup` | Synthesized: EP-Investigation's read-only tool policy + EKC's "retrieval, not judgment → cheap model" cost rule | `openrouter/google/gemini-2.5-flash-lite` → `google/gemini-2.5-flash-lite`, low | Lightweight search/find/explain/summarise; LSP/AST-first exploration; tools restricted to `read`/`grep`/`glob`/`lsp`/`ast_grep`; subagents disabled |
-| `architecture` | EP-Architecture | `openrouter/deepseek/deepseek-v4-pro` → `anthropic/claude-sonnet-5`, high | Heavy/thinking profile for system design — decides, doesn't build |
-| `implementation` | EP-Implementation | `openrouter/minimax/minimax-m3` → `anthropic/claude-sonnet-5`, medium | Build against a settled plan |
-| `review` | EP-Review | `openrouter/deepseek/deepseek-v4-pro` → `anthropic/claude-sonnet-5`, high | Multi-pass audit; findings only, no edits |
-| `investigation` | EP-Investigation | `openrouter/minimax/minimax-m3` → `anthropic/claude-sonnet-5`, medium | Root-cause debugging; read-only |
-| `premium` | EP-Premium | `anthropic/claude-opus-4-8` (no cheap primary — deliberate), high | Schema/secrets/migrations — the T1 safety-floor profile |
-| `hotfix` | EP-FastCheap | `openrouter/deepseek/deepseek-v4-flash` → `deepseek/deepseek-v4-flash`, low | Reversible UI fixes under time pressure; guardrails still apply |
+| `lookup` | Synthesized: EP-Investigation's read-only tool policy + EKC's "retrieval, not judgment → cheap model" cost rule | `google/gemini-2.5-flash-lite` → `deepseek/deepseek-v4-flash` → `anthropic/claude-sonnet-5`, low | Lightweight search/find/explain/summarise; LSP/AST-first exploration; tools restricted to `read`/`grep`/`glob`/`lsp`/`ast_grep`; subagents disabled |
+| `architecture` | EP-Architecture | `deepseek/deepseek-v4-pro` → `anthropic/claude-sonnet-5`, high | Heavy/thinking profile for system design — decides, doesn't build |
+| `implementation` | EP-Implementation | `minimax/minimax-m3` → `anthropic/claude-sonnet-5`, medium | Build against a settled plan |
+| `review` | EP-Review | `deepseek/deepseek-v4-pro` → `anthropic/claude-sonnet-5`, high | Multi-pass audit; findings only, no edits |
+| `investigation` | EP-Investigation | `minimax/minimax-m3` → `anthropic/claude-sonnet-5`, medium | Root-cause debugging; read-only |
+| `premium` | EP-Premium | `anthropic/claude-opus-4-8` (no cheap primary, no fallback — deliberate), high | Schema/secrets/migrations — the T1 safety-floor profile |
+| `hotfix` | EP-FastCheap | `deepseek/deepseek-v4-flash` → `google/gemini-2.5-flash-lite` → `anthropic/claude-sonnet-5`, low | Reversible UI fixes under time pressure; guardrails still apply |
 
-`premium` is the one tier deliberately left on Opus with no cheaper
-primary: it fires on schema, secrets, migrations, and destructive git
-operations, where the cost of a wrong answer dwarfs token spend. If you
-want it cheaper anyway, it's a one-line change to a chain like
-`["openrouter/deepseek/deepseek-v4-pro", "anthropic/claude-opus-4-8"]`.
+`premium` is the one tier deliberately left on Opus, with no cheaper
+primary **and no fallback link**: it fires on schema, secrets,
+migrations, and destructive git operations, where the cost of a wrong
+answer dwarfs token spend. A fallback there would defeat the safety
+floor, so the chain is one element by design. If you want it cheaper
+anyway, it's a one-line change to a chain like
+`["deepseek/deepseek-v4-pro", "anthropic/claude-opus-4-8"]`.
+
+Because a bare high-stakes noun alone would route far too much traffic to
+Opus, `premium` also carries `"minScore": 2`: single-word signals
+(`schema`, `migration`, `secret`, `credential`, `password`) need a second
+match to trigger it, while genuinely single-signal destructive actions
+(`api key`, `private key`, `connection string`, `force-push`,
+`reset --hard`, `branch deletion`) sit in `scopes` at weight 2 and still
+trigger it on their own.
 
 ### Cheap-tier models: not just Claude variants
 
@@ -190,16 +213,21 @@ candidates for any profile's `model` chain:
 
 Notes:
 
-- `ctx.models.resolve()` only matches **credentialed** providers. Strings
-  in `provider/id` form fall back to raw-id matching, so
-  `google/gemini-2.5-flash-lite` resolves through OpenRouter even without
-  a Google key (OpenRouter ids are themselves `vendor/model` shaped). To
-  *force* OpenRouter routing, prefix explicitly:
-  `openrouter/google/gemini-2.5-flash-lite`.
+- `ctx.models.resolve()` matches against the **catalog and configured
+  aliases only — it does not check credentials**. Credentials are
+  reported by `pi.setModel()`, which returns `false` (never throws) when
+  no API key is available for that model. Both halves matter, because the
+  chain has to advance on either signal.
+- Do **not** write `openrouter/*`-prefixed strings: they are not entries
+  in the installed pi-catalog, so they fail `resolve()` and silently
+  consume a link of the chain (DECISIONS #29). Use the native
+  `provider/id` form; OpenRouter proxies these same strings at runtime.
 - Picking a model the user has no credentials for is safe: the chain
-  falls through to the next candidate, and only a fully-dead chain warns
-  (once) and continues on the current model — never a silent degrade or
-  a crash (see §6).
+  falls through to the next candidate on *either* an unresolvable string
+  or a credential refusal, and only a fully-exhausted chain warns (once)
+  and continues on the current model — never a silent degrade or a crash
+  (see §6). An approval whose `setModel` then failed on credentials is
+  not remembered, so a later credentialed session asks again.
 - Keep judgment work (schema, security, architecture verdicts) on the
   premium tiers; the cheap tier is for retrieval, summarisation, and
   small reversible edits.
@@ -244,23 +272,53 @@ On **every** prompt submission (`before_agent_start`):
    you of the fallback, and auto-classification resumes for that prompt —
    the status line will **not** show `(manual)` next to whatever
    auto-classified profile happens to match.
+4b. **Stickiness**: if nothing matched and the prompt is a short (<6 token)
+   continuation — `"ok"`, `"continue"`, `"go on"` — it inherits the previous
+   turn's profile instead of falling to `default`, so a follow-up keeps the
+   context it was working in. **Exception**: a continuation containing an
+   action verb (`fix`, `change`, `add`, `remove`, `update`, `edit`, `write`,
+   `rename`, `refactor`, `patch`, `apply`, `revert`, `implement`, `install`,
+   `create`) will **not** inherit a profile declaring
+   `"capabilities": {"write": false}`. Inheriting a read-only profile into a
+   turn that asks for a change is a trap: `"now fix it"` after a `lookup` or
+   `investigation` turn would arrive with no `edit`/`write` tool, blocked
+   subagents, and a rule saying fixes belong to a separate pass — it could
+   only refuse or fail. Those turns fall through to `default`, which has a
+   full toolset. Write-capable profiles are inherited normally.
 5. Fields are merged per the semantics above.
 6. **Status line** updates to `⚙ profile-a+profile-b` (or `⚙ default` on no
    match; `(manual)` suffix when pinned; a `🔒` suffix whenever the active
    profile restricts the toolset — see step 8).
 7. **Model routing**: if the merged `model` resolves to a different model
-   than the current session model, you get a one-tap confirm dialog
-   (`ctx.ui.confirm`) naming the suggesting profile and the target model.
-   Your answer is remembered for that exact `(from → to)` model pair and
-   **persisted to `.omp/model-decisions.json`**, so you won't be asked
-   again for the same switch — not even in a new session. Declines persist
-   the same way (the switch is silently skipped). Delete the file (or the
-   specific key inside it) to be asked again. If you decline, nothing
-   changes. If the resolved model has no credentials, you get a warning
-   telling you to run `/model <spec>` manually instead. If the profile's
-   `model` string can't be resolved at all (typo, provider not installed),
-   you get a one-time warning per session naming the profile and the bad
-   model string, then the session continues on the current model.
+   than the current session model, the extension either applies the switch
+   outright or asks first, depending on which way the price moves.
+   - **Downgrades apply with no dialog.** When the target is *strictly*
+     cheaper than the current model — lower `cost.input` **and** lower
+     `cost.output` in the catalog, both sides priced — the switch is
+     applied and announced with an info notification. The confirm exists
+     to prevent surprise spend, and a switch that can only save money
+     isn't one. Auto-applied downgrades bypass the remembered-answer map
+     entirely and are never written to it, so one stray "no" can't
+     permanently disable a saving. Anything ambiguous (unpriced model,
+     cheaper on one axis only) is treated as *not* a downgrade and asks.
+   - **Everything else asks once**, via a one-tap confirm dialog
+     (`ctx.ui.confirm`) naming the suggesting profile and the target
+     model. Your answer is remembered for that exact `(from → to)` model
+     pair and **persisted to `.omp/model-decisions.json`**, so you won't
+     be asked again for the same switch — not even in a new session.
+     Declines persist the same way (the switch is silently skipped) and
+     stop the fallback chain: declining means "stay where I am", not "try
+     the next candidate". Inspect the map with `/profile decisions` and
+     clear it with `/profile decisions reset` (or delete the file, or the
+     one key inside it).
+
+   If a resolved model has no credentials, `pi.setModel()` returns false
+   and the chain **advances to the next candidate** rather than giving up;
+   an approval that never took effect this way is dropped from the map, so
+   a later credentialed session asks again. Only when every candidate is
+   exhausted — unresolvable, uncredentialed, or both — do you get a
+   one-time warning per session naming the profile, the candidates, the
+   reason, and the model the session is staying on.
 8. **Thinking level** and **active tools** are applied silently (no
    confirm) — thinking level is a low-stakes generation parameter. When
    the merged `tools` list is non-empty the toolset is restricted to it
@@ -287,10 +345,20 @@ On **every** prompt submission (`before_agent_start`):
 11. **Telemetry**: every routing decision (including default/no-match
     routes) appends one JSON line to `.profile-router-telemetry.log` in
     the project directory: timestamp, the first 200 characters of the
-    prompt, chosen profile, confidence margin, and runner-up. Summarize it
-    with `/profile telemetry`. **Privacy note**: prompt text is stored in
-    plaintext and the file grows without bound; it is gitignored (via the
-    `*.log` rule), but delete it whenever you want the history gone.
+    prompt, chosen profile, confidence margin, runner-up, and the `model` +
+    `thinkingLevel` the turn actually ran on. The last two are written
+    after model routing resolves, so they record what was really used —
+    which is not the profile's declared chain when the chain fell through,
+    the user declined, or nothing resolved. That is what makes the log
+    answer "where did the money go" and not just "was the routing right".
+    Summarize it with `/profile telemetry`. Rows written before these
+    fields existed still parse and are counted as `(unrecorded)`.
+    **Privacy note**: prompt text is stored in plaintext; it is gitignored
+    (via the `*.log` rule), but delete it whenever you want the history
+    gone. The log rotates to `.profile-router-telemetry.log.1` (one
+    generation, overwritten) past 1 MiB, so it no longer grows without
+    bound — the rotated file is gitignored explicitly, since `*.log` does
+    not match a `.log.1` suffix.
     `.omp/misroutes.jsonl` (written by `/profile misroute`) stores up to
     500 characters per logged prompt and is gitignored explicitly.
 
@@ -347,10 +415,13 @@ On **every** prompt submission (`before_agent_start`):
   as `before_agent_start`, so what you see is exactly what gets injected into
   each prompt.
 - `/profile telemetry` — summarizes `.profile-router-telemetry.log`:
-  per-profile route counts, how many prompts fell through to `default`
-  (missing-vocabulary candidates), and the low-margin routes (margin ≤ 1 —
-  one stray keyword away from flipping profile, shown with prompt preview
-  and runner-up). This is the data to consult before tuning keywords.
+  per-profile route counts, **routes by model** (count and share per model
+  actually used — the spend view), how many prompts fell through to
+  `default` (missing-vocabulary candidates), and the low-margin routes
+  (margin ≤ 1 — one stray keyword away from flipping profile, shown with
+  prompt preview and runner-up). Profile counts tell you whether routing
+  was right; the model breakdown tells you what it cost. This is the data
+  to consult before tuning keywords.
 - `/profile misroute [expected-profile]` — logs the last classified prompt
   (truncated to 500 chars), the profiles it matched, and (optionally) the
   profile you expected it to match, as a single JSON line appended to
@@ -422,17 +493,23 @@ so profiles are edited as JSON and reviewed like code. Use `/profile validate`
   (`/profile clear`).
 
 **Model switch not happening**
-- Check you approved the confirm dialog — declining is remembered for that
-  `(from → to)` pair and won't ask again.
-- Check for a "No credentials available" warning — the model resolved but
-  you have no API key/OAuth for that provider. Run `/model <spec>`
-  manually once credentials are configured.
-- If `ctx.models.resolve()` can't resolve your `bundles.json` model string
-  at all (typo, provider not installed), you get a warning notification
-  naming the profile and the unresolved model string (once per session per
-  model string), and the session continues on the current model. With
-  `PROFILE_ROUTER_DEBUG=1` a matching debug log line also records "model not
-  resolvable".
+- Run `/profile decisions`. A remembered decline for that `(from → to)`
+  pair suppresses the dialog and the switch, in every session, until you
+  run `/profile decisions reset`. This does not apply to strict
+  downgrades, which ignore the map and always apply.
+- If you expected a downgrade to skip the dialog and it asked instead, the
+  saving wasn't unambiguous: the target must be cheaper on **both**
+  `cost.input` and `cost.output`, and both models must carry non-zero
+  prices in the catalog. Unpriced entries (`cost: 0`) always ask.
+- If every candidate in the chain is uncredentialed, you get one warning
+  per session listing them, and the session stays on its current model.
+  Run `/model <spec>` manually once credentials are configured.
+- If `ctx.models.resolve()` can't resolve your `bundles.json` model strings
+  at all (typo, provider not installed, or an `openrouter/*` prefix — see
+  §2), the same one-per-session warning fires naming the profile and the
+  candidates, and the session continues on the current model. With
+  `PROFILE_ROUTER_DEBUG=1` a matching debug log line records "model chain
+  exhausted" along with any uncredentialed candidates.
 
 **Malformed or missing `bundles.json`**
 - The extension never crashes the session on bad config. A parse failure

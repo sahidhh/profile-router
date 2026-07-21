@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { classify, merge, loadBundles, explain, validateBundles, type Bundles, type Profile } from "../profile-router.ts";
+import { classify, merge, loadBundles, explain, validateBundles, isStrictDowngrade, type Bundles, type Profile } from "../profile-router.ts";
 
 // ---------- Fixtures ----------
 
@@ -596,6 +596,54 @@ describe("bundles.json reachability", () => {
     }
   });
 
+  // premium is the safety floor AND the most expensive route (Opus, high thinking), so it
+  // must not be reachable on a single bare noun. Before minScore:2 it won every 1-1 tie
+  // against lookup via declaration order, billing "what is the schema of the users table"
+  // at Opus. Single-signal destructive/credential actions stay reachable alone by living in
+  // `scopes` (weight 2) rather than `keywords` (weight 1).
+  test("bare high-stakes nouns alone do not reach premium — read-only questions stay on lookup", () => {
+    for (const promptText of [
+      "what is the schema of the users table",
+      "show me where the auth token is read from config",
+      "summarize the migration files",
+      "explain the password reset flow",
+    ]) {
+      const hits = classify(promptText, realBundles);
+      assert.equal(
+        hits[0]?.profile.name,
+        "lookup",
+        `expected lookup (cheap) to win "${promptText}", got ${hits[0]?.profile.name ?? "default"}`,
+      );
+    }
+  });
+
+  test('"how many …" counting questions are retrieval, and route to lookup', () => {
+    for (const promptText of ["how many tokens does this prompt use", "how many migrations are pending"]) {
+      const hits = classify(promptText, realBundles);
+      assert.equal(hits[0]?.profile.name, "lookup", `expected lookup for "${promptText}"`);
+    }
+    // …unless a stronger profile's own vocabulary is present too.
+    assert.equal(classify("how many review findings are open", realBundles)[0]?.profile.name, "review");
+  });
+
+  test("premium safety floor still triggers on a single destructive or credential signal", () => {
+    for (const promptText of [
+      "rotate the api key credential",
+      "force-push the fix to main",
+      "run git reset --hard on the release branch",
+      "edit the migration schema",
+      "update the connection string in appsettings",
+      "do the branch deletion for merged branches",
+    ]) {
+      const hits = classify(promptText, realBundles);
+      assert.equal(
+        hits[0]?.profile.name,
+        "premium",
+        `expected premium for "${promptText}", got ${hits[0]?.profile.name ?? "default"}`,
+      );
+    }
+  });
+
   // SUPERSEDES 0b233c2 / b021cbe, which routed "repo"-scoped prompts to investigation by
   // putting "repo"/"repository"/"codebase" in lookup.excludeKeywords. That exclusion vetoed
   // the orientation verb before it could score, so "summarize what this repo does" — a
@@ -846,6 +894,7 @@ async function installExtension(dir: string) {
   const notifications: { msg: string; level: string }[] = [];
   const setModelCalls: unknown[] = [];
   const setActiveToolsCalls: string[][] = [];
+  const denyCredentials = new Set<string>();
 
   const fakePi = {
     on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
@@ -854,9 +903,13 @@ async function installExtension(dir: string) {
     registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => unknown }) => {
       commands[name] = opts;
     },
+    // `denyCredentials` simulates the real setModel contract: it returns false (not throws)
+    // when no API key is available for that model. Empty by default, so every existing test
+    // keeps its "setModel always succeeds" behavior.
     setModel: async (model: unknown) => {
+      const m = model as { provider: string; id: string };
       setModelCalls.push(model);
-      return true;
+      return !denyCredentials.has(`${m.provider}/${m.id}`);
     },
     setThinkingLevel: () => {},
     getActiveTools: () => ["read", "grep", "glob", "edit", "write", "bash"],
@@ -881,7 +934,7 @@ async function installExtension(dir: string) {
     model: undefined,
   };
 
-  return { handlers, commands, notifications, statuses, setModelCalls, setActiveToolsCalls, ctx };
+  return { handlers, commands, notifications, statuses, setModelCalls, setActiveToolsCalls, denyCredentials, ctx };
 }
 
 describe("F2 regression: stale /profile override never mislabels an auto-classified profile as manual", () => {
@@ -1182,6 +1235,72 @@ describe("model fallback chain: array model resolves in order", () => {
         notifications.filter((n) => n.level === "warning").length,
         0,
         "a chain with a resolvable fallback must not warn",
+      );
+    });
+  });
+
+  // resolve() is catalog/alias-only and never checks credentials; setModel() is what
+  // reports a missing API key, by returning false. The chain therefore has to advance on
+  // a false from setModel, not only on an undefined from resolve — otherwise an
+  // uncredentialed first link stranded the session on its ambient model, which for a
+  // cheap profile following a premium turn meant silently billing at premium rates.
+  test("a resolvable but uncredentialed candidate falls through to the next link", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({
+            name: "cred-chain-profile",
+            keywords: ["cred-kw"],
+            model: ["deepseek/deepseek-v4-flash", "anthropic/claude-sonnet-5"],
+          }),
+        ],
+      });
+
+      const { handlers, notifications, setModelCalls, denyCredentials, ctx } = await installExtension(dir);
+      const flash = { id: "deepseek-v4-flash", provider: "deepseek", name: "Flash" };
+      const sonnet = { id: "claude-sonnet-5", provider: "anthropic", name: "Sonnet" };
+      ctx.models.resolve = ((spec: string) =>
+        spec === "deepseek/deepseek-v4-flash" ? flash : spec === "anthropic/claude-sonnet-5" ? sonnet : undefined) as never;
+      denyCredentials.add("deepseek/deepseek-v4-flash");
+
+      await handlers["before_agent_start"]!({ prompt: "cred-kw here", systemPrompt: [] }, ctx);
+
+      assert.deepEqual(
+        setModelCalls,
+        [flash, sonnet],
+        "must attempt the uncredentialed link, then apply the credentialed fallback",
+      );
+      assert.equal(
+        notifications.filter((n) => n.level === "warning").length,
+        0,
+        "a chain that lands on a working fallback must not warn",
+      );
+    });
+  });
+
+  test("an uncredentialed candidate's approval is not remembered, so a credentialed session re-asks", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({ name: "cred-forget-profile", keywords: ["forget-kw"], model: ["deepseek/deepseek-v4-flash"] }),
+        ],
+      });
+
+      const { handlers, denyCredentials, ctx } = await installExtension(dir);
+      const flash = { id: "deepseek-v4-flash", provider: "deepseek", name: "Flash" };
+      ctx.models.resolve = ((spec: string) => (spec === "deepseek/deepseek-v4-flash" ? flash : undefined)) as never;
+      denyCredentials.add("deepseek/deepseek-v4-flash");
+
+      await handlers["before_agent_start"]!({ prompt: "forget-kw here", systemPrompt: [] }, ctx);
+
+      const decisionsFile = path.join(dir, ".omp", "model-decisions.json");
+      const persisted = fs.existsSync(decisionsFile)
+        ? (JSON.parse(fs.readFileSync(decisionsFile, "utf-8")) as Record<string, boolean>)
+        : {};
+      assert.equal(
+        Object.keys(persisted).length,
+        0,
+        "an approval that never took effect must not persist as a remembered decision",
       );
     });
   });
@@ -1828,13 +1947,40 @@ describe("T01-03: two-axis scoring routing", () => {
     assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
   });
 
-  test('stickiness: "now fix it" triggers sticky continuation', () => {
+  // INVERTS an earlier assertion that "now fix it" inherits `investigation`. Inheriting a
+  // read-only profile into a turn that asks for a change is a trap, not a convenience:
+  // `investigation` has no edit/write tool and carries a rule saying fixes happen in a
+  // separate pass, so the inherited turn could only refuse or fail. Falling through to
+  // `default` gives it a full toolset. Bare continuations are unaffected — see the
+  // "ok go on" / "continue" / "next" tests above, which still inherit.
+  test('stickiness: an action verb does NOT inherit a read-only profile', () => {
     const first = classify("investigate the root cause of why this test is flaky, trace through the logs", realBundles);
     assert.equal(first[0]?.profile.name, "investigation");
 
     const second = classify("now fix it", realBundles, first[0]!.profile.name);
-    assert.equal(second[0]?.profile.name, "investigation");
-    assert.equal(second[0]?.inherited, true, "should be marked inherited, not freshly classified");
+    assert.equal(second.length, 0, "an action prompt must not inherit a read-only profile — it falls to default");
+  });
+
+  test('stickiness: an action verb still inherits a WRITE-capable profile', () => {
+    const first = classify("please implement the new feature and write the code for the endpoint", realBundles);
+    assert.equal(first[0]?.profile.name, "implementation");
+
+    // `implementation` can act, so there is no trap to avoid — carrying it forward is
+    // exactly what the user wants for a bare "now fix it".
+    const second = classify("now fix it", realBundles, first[0]!.profile.name);
+    assert.equal(second[0]?.profile.name, "implementation");
+    assert.equal(second[0]?.inherited, true);
+  });
+
+  test('stickiness: a read-only profile still inherits a non-action continuation', () => {
+    const first = classify("can you find where the auth middleware is defined and explain how it works", realBundles);
+    assert.equal(first[0]?.profile.name, "lookup");
+
+    for (const cont of ["ok", "continue", "go on", "and then?"]) {
+      const second = classify(cont, realBundles, first[0]!.profile.name);
+      assert.equal(second[0]?.profile.name, "lookup", `"${cont}" should still inherit lookup`);
+      assert.equal(second[0]?.inherited, true);
+    }
   });
 
   test('stickiness: "go on" triggers sticky continuation', () => {
@@ -2237,6 +2383,236 @@ describe("/profile telemetry: routing-log summary", () => {
       assert.ok(/default: 1/.test(summary!), `default count wrong: ${summary}`);
       assert.ok(/1 default route — prompts the vocabulary missed/.test(summary!), `default callout missing: ${summary}`);
       assert.ok(/Low-margin routes \(margin <= 1\): 2/.test(summary!), `low-margin count wrong: ${summary}`);
+    });
+  });
+});
+
+// ---------- Downgrades apply without a confirm; upgrades still ask ----------
+
+describe("isStrictDowngrade: only an unambiguous saving skips the confirm", () => {
+  const priced = (input: number, output: number) => ({ input, output });
+
+  test("cheaper on both axes is a downgrade", () => {
+    assert.equal(isStrictDowngrade(priced(15, 75), priced(1, 5)), true);
+  });
+
+  test("cheaper on only one axis is not a downgrade", () => {
+    assert.equal(isStrictDowngrade(priced(15, 75), priced(1, 80)), false);
+    assert.equal(isStrictDowngrade(priced(15, 75), priced(20, 5)), false);
+  });
+
+  test("an upgrade or an identical price is not a downgrade", () => {
+    assert.equal(isStrictDowngrade(priced(1, 5), priced(15, 75)), false);
+    assert.equal(isStrictDowngrade(priced(3, 15), priced(3, 15)), false);
+  });
+
+  // Catalog entries carry cost 0 for "unpriced/unknown", not "free" — treating those as
+  // cheap would auto-apply switches to models whose price nobody knows.
+  test("unknown pricing (zero or missing cost) falls back to asking", () => {
+    assert.equal(isStrictDowngrade(priced(15, 75), priced(0, 0)), false);
+    assert.equal(isStrictDowngrade(priced(0, 0), priced(1, 5)), false);
+    assert.equal(isStrictDowngrade(undefined, priced(1, 5)), false);
+    assert.equal(isStrictDowngrade(priced(15, 75), undefined), false);
+  });
+});
+
+describe("model confirm: downgrades auto-apply, upgrades still ask", () => {
+  const opus = { id: "claude-opus-4-8", provider: "anthropic", name: "Opus", cost: { input: 15, output: 75 } };
+  const lite = { id: "gemini-2.5-flash-lite", provider: "google", name: "Lite", cost: { input: 0.1, output: 0.4 } };
+
+  test("a cheaper model applies with no dialog, and announces itself", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "cheap-profile", keywords: ["cheap-kw"], model: ["google/gemini-2.5-flash-lite"] })],
+      });
+
+      const { handlers, notifications, setModelCalls, ctx } = await installExtension(dir);
+      let confirms = 0;
+      ctx.model = opus as never;
+      ctx.models.resolve = ((spec: string) => (spec === "google/gemini-2.5-flash-lite" ? lite : undefined)) as never;
+      ctx.ui.confirm = (async () => {
+        confirms++;
+        return true;
+      }) as never;
+
+      await handlers["before_agent_start"]!({ prompt: "cheap-kw please", systemPrompt: [] }, ctx);
+
+      assert.equal(confirms, 0, "a strictly cheaper switch must not interrupt the user");
+      assert.deepEqual(setModelCalls, [lite], "the downgrade must actually be applied");
+      assert.ok(
+        notifications.some((n) => n.msg.includes("google/gemini-2.5-flash-lite") && n.msg.includes("cheaper")),
+        `downgrade must be announced, got: ${JSON.stringify(notifications)}`,
+      );
+      assert.ok(
+        !fs.existsSync(path.join(dir, ".omp", "model-decisions.json")),
+        "an auto-applied downgrade is not a user decision and must not be persisted",
+      );
+    });
+  });
+
+  test("a previously declined downgrade is no longer suppressed forever", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "cheap-profile", keywords: ["cheap-kw"], model: ["google/gemini-2.5-flash-lite"] })],
+      });
+      // A stale decline from before this behavior existed — the exact case that used to
+      // keep a session paying Opus rates silently, forever.
+      fs.mkdirSync(path.join(dir, ".omp"), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, ".omp", "model-decisions.json"),
+        JSON.stringify({ "anthropic/claude-opus-4-8→google/gemini-2.5-flash-lite": false }),
+      );
+
+      const { handlers, setModelCalls, ctx } = await installExtension(dir);
+      ctx.model = opus as never;
+      ctx.models.resolve = ((spec: string) => (spec === "google/gemini-2.5-flash-lite" ? lite : undefined)) as never;
+
+      await handlers["before_agent_start"]!({ prompt: "cheap-kw please", systemPrompt: [] }, ctx);
+
+      assert.deepEqual(setModelCalls, [lite], "a remembered decline must not veto a strict downgrade");
+    });
+  });
+
+  test("an upgrade still asks and still honours a decline", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "dear-profile", keywords: ["dear-kw"], model: ["anthropic/claude-opus-4-8"] })],
+      });
+
+      const { handlers, setModelCalls, ctx } = await installExtension(dir);
+      let confirms = 0;
+      ctx.model = lite as never;
+      ctx.models.resolve = ((spec: string) => (spec === "anthropic/claude-opus-4-8" ? opus : undefined)) as never;
+      ctx.ui.confirm = (async () => {
+        confirms++;
+        return false;
+      }) as never;
+
+      await handlers["before_agent_start"]!({ prompt: "dear-kw please", systemPrompt: [] }, ctx);
+
+      assert.equal(confirms, 1, "a switch to a dearer model must still ask");
+      assert.equal(setModelCalls.length, 0, "a declined upgrade must not be applied");
+    });
+  });
+});
+
+describe("/profile decisions: remembered answers are inspectable and resettable", () => {
+  test("lists persisted answers, and reset clears both the map and the file", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "p", keywords: ["kw"] })] });
+      fs.mkdirSync(path.join(dir, ".omp"), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, ".omp", "model-decisions.json"),
+        JSON.stringify({ "a/b→c/d": false, "e/f→g/h": true }),
+      );
+
+      const { commands, notifications, ctx } = await installExtension(dir);
+
+      await commands["profile"]!.handler("decisions", ctx);
+      const listed = notifications.at(-1)!.msg;
+      assert.ok(/Remembered model decisions \(2\)/.test(listed), `expected a listing, got: ${listed}`);
+      assert.ok(listed.includes("✗ decline  a/b→c/d"), "declines must be shown as declines");
+      assert.ok(listed.includes("✓ accept  e/f→g/h"), "accepts must be shown as accepts");
+
+      await commands["profile"]!.handler("decisions reset", ctx);
+      assert.ok(/Cleared 2 remembered model decisions/.test(notifications.at(-1)!.msg));
+      assert.deepEqual(
+        JSON.parse(fs.readFileSync(path.join(dir, ".omp", "model-decisions.json"), "utf-8")),
+        {},
+        "reset must rewrite the persisted file, not just the in-memory map",
+      );
+    });
+  });
+});
+
+// ---------- Telemetry records spend, not just routing accuracy ----------
+
+describe("telemetry: rows record the model and thinking level the turn actually ran on", () => {
+  const lite = { id: "gemini-2.5-flash-lite", provider: "google", name: "Lite", cost: { input: 0.1, output: 0.4 } };
+  const opus = { id: "claude-opus-4-8", provider: "anthropic", name: "Opus", cost: { input: 15, output: 75 } };
+
+  test("the applied model is logged, not merely the profile's declared chain", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [
+          profile({
+            name: "cheap",
+            keywords: ["cheap-kw"],
+            model: ["google/gemini-2.5-flash-lite"],
+            thinkingLevel: "low",
+          }),
+        ],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      ctx.model = opus as never;
+      ctx.models.resolve = ((spec: string) => (spec === "google/gemini-2.5-flash-lite" ? lite : undefined)) as never;
+
+      await handlers["before_agent_start"]!({ prompt: "cheap-kw test", systemPrompt: [] }, ctx);
+
+      const row = JSON.parse(fs.readFileSync(path.join(dir, ".profile-router-telemetry.log"), "utf-8").trim());
+      assert.equal(row.model, "google/gemini-2.5-flash-lite", "must log the model the switch landed on");
+      assert.equal(row.thinkingLevel, "low");
+    });
+  });
+
+  // The whole point of the field: a declined or dead chain means the turn ran on the
+  // ambient model, and that is the row that explains an unexpectedly large bill.
+  test("a declined switch logs the model actually used, not the one the profile wanted", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "dear", keywords: ["dear-kw"], model: ["anthropic/claude-opus-4-8"] })],
+      });
+      const { handlers, ctx } = await installExtension(dir);
+      ctx.model = lite as never;
+      ctx.models.resolve = ((spec: string) => (spec === "anthropic/claude-opus-4-8" ? opus : undefined)) as never;
+      ctx.ui.confirm = (async () => false) as never;
+
+      await handlers["before_agent_start"]!({ prompt: "dear-kw test", systemPrompt: [] }, ctx);
+
+      const row = JSON.parse(fs.readFileSync(path.join(dir, ".profile-router-telemetry.log"), "utf-8").trim());
+      assert.equal(row.model, "google/gemini-2.5-flash-lite", "a declined switch keeps the current model");
+    });
+  });
+
+  test("/profile telemetry breaks routes down by model, tolerating rows written before the field existed", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "p", keywords: ["kw"] })] });
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+      fs.writeFileSync(
+        logPath,
+        [
+          JSON.stringify({ prompt: "a", chosenProfile: "p", margin: 2, runnerUpProfile: null, model: "google/gemini-2.5-flash-lite" }),
+          JSON.stringify({ prompt: "b", chosenProfile: "p", margin: 2, runnerUpProfile: null, model: "google/gemini-2.5-flash-lite" }),
+          JSON.stringify({ prompt: "c", chosenProfile: "p", margin: 2, runnerUpProfile: null, model: "anthropic/claude-opus-4-8" }),
+          JSON.stringify({ prompt: "d", chosenProfile: "p", margin: 2, runnerUpProfile: null }), // legacy row
+        ].join("\n") + "\n",
+      );
+
+      const { commands, notifications, ctx } = await installExtension(dir);
+      await commands["profile"]!.handler("telemetry", ctx);
+      const summary = notifications.at(-1)!.msg;
+
+      assert.ok(/Routes by model:/.test(summary), `expected a per-model section: ${summary}`);
+      assert.ok(/google\/gemini-2\.5-flash-lite: 2 \(50%\)/.test(summary), `expected cheap-model count: ${summary}`);
+      assert.ok(/anthropic\/claude-opus-4-8: 1 \(25%\)/.test(summary), `expected premium count: ${summary}`);
+      assert.ok(/\(unrecorded\): 1 \(25%\)/.test(summary), `legacy rows must be counted, not dropped: ${summary}`);
+    });
+  });
+
+  test("the log rotates instead of growing without bound", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, { profiles: [profile({ name: "p", keywords: ["kw"] })] });
+      const logPath = path.join(dir, ".profile-router-telemetry.log");
+      // One byte over the 1 MiB rotation threshold.
+      fs.writeFileSync(logPath, "x".repeat(1_048_577));
+
+      const { handlers, ctx } = await installExtension(dir);
+      await handlers["before_agent_start"]!({ prompt: "kw test", systemPrompt: [] }, ctx);
+
+      assert.ok(fs.existsSync(`${logPath}.1`), "the oversized log must be rotated aside");
+      const current = fs.readFileSync(logPath, "utf-8");
+      assert.equal(current.trim().split("\n").length, 1, "the fresh log holds only the new row");
+      assert.equal(JSON.parse(current.trim()).chosenProfile, "p");
     });
   });
 });

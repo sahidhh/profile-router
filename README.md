@@ -10,7 +10,7 @@ LLM calls** — it's word-boundary keyword scoring, so routing costs nothing.
 ```
 prompt ──► classify (keywords, no LLM) ──► merge matched profiles ──► apply
                                                                        ├─ rules → system prompt (this turn only)
-                                                                       ├─ model → confirm dialog, remembered per (from→to), persisted across sessions
+                                                                       ├─ model → downgrades auto-apply; anything else confirms once per (from→to), persisted across sessions
                                                                        ├─ thinkingLevel → silent
                                                                        ├─ tools → setActiveTools (🔒 in status; baseline auto-restored when no profile restricts)
                                                                        └─ disabledAgents → task-tool calls blocked
@@ -32,23 +32,31 @@ prompt ──► classify (keywords, no LLM) ──► merge matched profiles �
 
 ## The shipped profiles
 
-Every tier except `premium` runs an **OpenRouter-first fallback chain**: a
-cheap OpenRouter-routed primary, with the previous model as fallback (used
-automatically when OpenRouter isn't credentialed — a profile's `model` may
-be an array; the first spec that resolves wins). All model strings are
-verified against the installed catalog (see `MANUAL.md` §2 for drop-in
-alternates: DeepSeek, Gemini 2.5, MiniMax M3, IBM Granite micro, Qwen
+Every tier except `premium` runs a **cheap-first fallback chain**: a cheap
+native-provider primary, ending in a reliably-credentialed model (a profile's
+`model` is an array; the chain advances past any spec that fails to resolve
+*or* that the session has no credentials for). Model strings use native
+`provider/id` form — `openrouter/*` prefixes are not catalog entries and would
+fail to resolve; OpenRouter proxies these same strings at runtime. All model
+strings are verified against the installed catalog (see `MANUAL.md` §2 for
+drop-in alternates: DeepSeek, Gemini 2.5, MiniMax M3, IBM Granite micro, Qwen
 instruct, Trinity preview).
 
-| Profile | Triggers on | Model (primary → fallback) | Thinking | Tools | Character |
+| Profile | Triggers on | Model chain (primary → fallback) | Thinking | Tools | Character |
 |---|---|---|---|---|---|
-| `lookup` | find / where is / explain / summarize / overview | `openrouter/google/gemini-2.5-flash-lite` → `google/gemini-2.5-flash-lite` | low | read, grep, glob, lsp, ast_grep | Retrieval + summarisation, read-only, subagents blocked |
-| `hotfix` | hotfix / quick fix / urgent fix | `openrouter/deepseek/deepseek-v4-flash` → `deepseek/deepseek-v4-flash` | low | read, edit, bash | Reversible fixes under time pressure; guardrails never lowered |
-| `investigation` | root cause / debug / trace / reproduce | `openrouter/minimax/minimax-m3` → Sonnet | medium | + lsp, ast_grep, bash | Read-only root-causing; symptom patches rejected |
-| `implementation` | implement / build feature / write code | `openrouter/minimax/minimax-m3` → Sonnet | medium | full write set + lsp, ast_grep | Build against a settled plan |
-| `architecture` | design / redesign / cross-cutting | `openrouter/deepseek/deepseek-v4-pro` → Sonnet | high | read-only + lsp, ast_grep | Decides system shape; does not implement |
-| `review` | review / audit / pre-merge | `openrouter/deepseek/deepseek-v4-pro` → Sonnet | high | read-only + lsp, ast_grep | Findings only, no edits, max 2 fix cycles |
-| `premium` | schema / migration / secret / credential | Opus (no cheap primary — deliberate safety floor) | high | full set + lsp, ast_grep | Safety floor — guardrails never lowered |
+| `lookup` | find / where is / explain / summarize / overview | `google/gemini-2.5-flash-lite` → `deepseek/deepseek-v4-flash` → Sonnet | low | read, grep, glob, lsp, ast_grep | Retrieval + summarisation, read-only, subagents blocked |
+| `hotfix` | hotfix / quick fix / urgent fix | `deepseek/deepseek-v4-flash` → `google/gemini-2.5-flash-lite` → Sonnet | low | read, edit, bash | Reversible fixes under time pressure; guardrails never lowered |
+| `investigation` | root cause / debug / trace / reproduce | `minimax/minimax-m3` → Sonnet | medium | + lsp, ast_grep, bash | Read-only root-causing; symptom patches rejected |
+| `implementation` | implement / build feature / write code | `minimax/minimax-m3` → Sonnet | medium | full write set + lsp, ast_grep | Build against a settled plan |
+| `architecture` | design / redesign / cross-cutting | `deepseek/deepseek-v4-pro` → Sonnet | high | read-only + lsp, ast_grep | Decides system shape; does not implement |
+| `review` | review / audit / pre-merge | `deepseek/deepseek-v4-pro` → Sonnet | high | read-only + lsp, ast_grep | Findings only, no edits, max 2 fix cycles |
+| `premium` | destructive/credential actions, or 2+ high-stakes signals | Opus (no cheap primary, no fallback — deliberate safety floor) | high | full set + lsp, ast_grep | Safety floor — guardrails never lowered |
+
+`premium` carries `"minScore": 2`, so a single bare noun (`schema`,
+`migration`, `secret`) no longer reaches it — "what is the schema of the users
+table" stays on the cheap `lookup` tier. Single-signal destructive actions
+(`api key`, `force-push`, `reset --hard`, `branch deletion`, …) are weight-2
+`scopes` and still trigger it on their own.
 
 Multiple profiles can match one prompt: `rules`/`skills`/`tools` union,
 `disabledAgents` intersect (safety-conservative), `model`/`thinkingLevel`
@@ -83,13 +91,18 @@ context.
     showing how it would classify without sending it or changing any session state.
   - `/profile validate` — structural check of `bundles.json` (duplicate names,
     empty keywords, bad `thinkingLevel`/`model`) without sending a prompt.
-  - `/profile stats` — session counters: prompts classified per profile (including default), manual pins set, model switches accepted/declined.
+  - `/profile stats` — session counters: prompts classified per profile (including default), manual pins set, model switches accepted/declined, and downgrades auto-applied without a confirm.
+  - `/profile decisions` (`reset` to clear) — the remembered model-switch
+    answers behind `.omp/model-decisions.json`. A decline is otherwise
+    invisible: the switch just stops being offered, in every future session.
+    Strict downgrades ignore this map entirely.
   - `/profile telemetry` — summary of the routing log: per-profile route counts,
+    **routes by model** (what each turn actually ran on — the spend view),
     default (no-match) routes — the prompts your vocabulary missed — and
     low-margin routes one stray keyword away from flipping profile. Every
     routing decision (default included) is logged to
     `.profile-router-telemetry.log` (gitignored; prompt text truncated to 200
-    chars).
+    chars; rotates at 1 MiB).
   - `/profile rules` — prints the exact rules/skills block currently being injected into the system prompt for the active profile.
   - `/profile misroute [expected-profile]` — logs the last classified prompt
     (truncated to 500 chars), what it matched, and (optionally) what profile
