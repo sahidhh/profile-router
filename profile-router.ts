@@ -452,6 +452,7 @@ export default function (pi: ExtensionAPI) {
   let manualOverrideOnce = false;                  // true when manualOverride is a turn-scoped pin (/profile <name> --once)
   let lastPrompt: string | null = null;             // tracks last classified prompt for /profile misroute
   let debugTrace = false;                          // toggled via /profile debug on|off
+  let routingEnabled = true;                       // kill switch: /profile off pauses all routing (session-scoped)
   const modelDecisions = new Map<string, boolean>(); // "from→to" -> user's answer, for this session
   const unresolvedModelWarned = new Set<string>();   // model strings already warned about this session
   const promptsClassified = new Map<string, number>(); // profile name (or "default") -> count
@@ -562,8 +563,25 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Every prompt: classify, merge, inject ----
   pi.on("before_agent_start", async (event, ctx) => {
-    const { bundles, hash: currentHash } = loadBundlesWithHash(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
     lastPrompt = event.prompt;
+
+    // ---- Kill switch: /profile off pauses all routing ----
+    // Model, thinking level, tools, and rules all pass through untouched — the turn
+    // runs exactly as if this extension were not installed. We still release any
+    // toolset the router had restricted (so `off` lifts the 🔒 immediately rather
+    // than stranding a lookup-restricted toolset) and clear `active` so the tool_call
+    // agent-block hook goes inert. `/profile on` resumes on the next prompt.
+    if (!routingEnabled) {
+      if (baselineTools !== null) {
+        await pi.setActiveTools(baselineTools);
+        baselineTools = null;
+      }
+      active = null;
+      ctx.ui.setStatus("profile", "⏸ off");
+      return;
+    }
+
+    const { bundles, hash: currentHash } = loadBundlesWithHash(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
 
     // Telemetry and the debug trace both need the full explain() ranking; score
     // the profile table at most once per prompt and share the rows.
@@ -923,6 +941,27 @@ export default function (pi: ExtensionAPI) {
       );
     },
 
+    // ---- /profile off : pause all routing (kill switch) ----
+    // Idempotent. Tears down immediately — releases any restricted toolset, clears the
+    // active config so the agent-block hook goes inert, and flips the status line to ⏸ —
+    // so the effect is visible now, not only on the next prompt.
+    off: async (_arg, _rest, _sub, ctx) => {
+      routingEnabled = false;
+      if (baselineTools !== null) {
+        await pi.setActiveTools(baselineTools);
+        baselineTools = null;
+      }
+      active = null;
+      ctx.ui.setStatus("profile", "⏸ off");
+      ctx.ui.notify("Profile routing OFF — prompts pass through untouched (model, tools, thinking, rules). /profile on to resume.", "info");
+    },
+
+    // ---- /profile on : resume routing ----
+    on: (_arg, _rest, _sub, ctx) => {
+      routingEnabled = true;
+      ctx.ui.notify("Profile routing ON — resumes on the next prompt.", "info");
+    },
+
     // ---- /profile validate : structural check of bundles.json ----
     validate: (_arg, _rest, _sub, ctx) => {
       const bundles = loadBundles(ctx.cwd, (msg) => ctx.ui.notify(msg, "warning"));
@@ -1124,7 +1163,7 @@ export default function (pi: ExtensionAPI) {
   // ---- Manual override + status ----
   pi.registerCommand("profile", {
     description:
-      "Status/override: /profile [<name> [--once]|clear] | list | debug [on|off] | validate | explain <text> | stats | rules | telemetry | decisions [reset] | misroute [expected]",
+      "Status/override: /profile [<name> [--once]|clear] | off | on | list | debug [on|off] | validate | explain <text> | stats | rules | telemetry | decisions [reset] | misroute [expected]",
     handler: async (args, ctx) => {
       const arg = (args ?? "").trim();
       const [sub, ...rest] = arg.split(/\s+/);
@@ -1175,6 +1214,10 @@ export default function (pi: ExtensionAPI) {
         stickyPrevProfile = null;
         manualPinsSet++;
         ctx.ui.notify(`Profile pinned to "${arg}" until /profile clear`, "info");
+        return;
+      }
+      if (!routingEnabled) {
+        ctx.ui.notify("Profile routing is OFF (/profile on to resume). Prompts pass through untouched.", "info");
         return;
       }
       const pendingNote = manualOverrideOnce ? `\nPending once-pin: ${manualOverride} (applies to the next prompt only)` : "";
