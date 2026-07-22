@@ -2402,6 +2402,70 @@ describe("/profile off|on: routing kill switch", () => {
       assert.equal(setActiveToolsCalls.length, 2, "second off is a no-op on tools");
     });
   });
+
+  test("off persists across sessions: a re-installed extension resumes off", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "narrow", keywords: ["narrow-kw"], model: ["some/model"] })],
+      });
+
+      // Session 1: turn routing off.
+      {
+        const { commands, ctx } = await installExtension(dir);
+        await commands["profile"]!.handler("off", ctx);
+      }
+
+      // The state must be written to disk.
+      const statePath = path.join(dir, ".omp", "routing-state.json");
+      assert.ok(fs.existsSync(statePath), "off writes routing-state.json");
+      assert.deepEqual(JSON.parse(fs.readFileSync(statePath, "utf-8")), { enabled: false });
+
+      // Session 2 (fresh extension instance = new session): a matching prompt must
+      // stay off — the persisted kill switch is resumed from disk.
+      {
+        const { handlers, statuses, setModelCalls, ctx } = await installExtension(dir);
+        const res = await handlers["before_agent_start"]!({ prompt: "narrow-kw here", systemPrompt: ["base"] }, ctx);
+        assert.equal(statuses["profile"], "⏸ off", "new session resumes off from disk");
+        assert.equal(setModelCalls.length, 0, "no model routing in a resumed-off session");
+        assert.equal(res, undefined, "no system-prompt injection in a resumed-off session");
+      }
+    });
+  });
+
+  test("on persists across sessions: a re-installed extension resumes on", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "narrow", keywords: ["narrow-kw"], model: ["some/model"] })],
+      });
+
+      // Session 1: off then back on — the file must record the latest state (on).
+      {
+        const { commands, ctx } = await installExtension(dir);
+        await commands["profile"]!.handler("off", ctx);
+        await commands["profile"]!.handler("on", ctx);
+      }
+      const statePath = path.join(dir, ".omp", "routing-state.json");
+      assert.deepEqual(JSON.parse(fs.readFileSync(statePath, "utf-8")), { enabled: true });
+
+      // Session 2: routing is live again.
+      {
+        const { handlers, statuses, ctx } = await installExtension(dir);
+        await handlers["before_agent_start"]!({ prompt: "narrow-kw here", systemPrompt: [] }, ctx);
+        assert.equal(statuses["profile"], "⚙ narrow", "new session resumes on from disk");
+      }
+    });
+  });
+
+  test("no state file defaults to on (fresh project)", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "narrow", keywords: ["narrow-kw"] })],
+      });
+      const { handlers, statuses, ctx } = await installExtension(dir);
+      await handlers["before_agent_start"]!({ prompt: "narrow-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ narrow", "no routing-state.json → routing on by default");
+    });
+  });
 });
 
 describe("/profile telemetry: routing-log summary", () => {

@@ -82,13 +82,16 @@ context.
   just the next prompt — it auto-clears immediately after that one prompt is
   classified, so you don't have to remember to `/profile clear` afterward.
 - **Pause routing entirely with `/profile off` (`/profile on` to resume).** A
-  session-scoped kill switch: while off, every prompt passes through untouched —
+  kill switch for the whole router: while off, every prompt passes through untouched —
   no model routing, no thinking-level or toolset changes, no rule injection, no
   agent blocking, exactly as if the extension weren't installed. `off` takes
   effect immediately (it also lifts any active `🔒` toolset restriction) and the
   status line shows `⏸ off`. Unlike `/profile clear` (which only unpins and
-  leaves auto-classification running), `off` stops the router completely. It
-  resets to on at the start of each session.
+  leaves auto-classification running), `off` stops the router completely. The
+  state **persists across sessions** — it is written to
+  `.omp/routing-state.json`, so a project left with routing off comes back off
+  after you exit and reopen omp; run `/profile on` to resume (or delete the
+  file). New projects with no state file default to on.
 - **Discover and debug with the `/profile` subcommands:**
   - `/profile list` — every profile with its one-line description, model, and
     thinking level.

@@ -117,5 +117,6 @@ dist
 # bundles.json, so ignore it explicitly (the telemetry log is covered by *.log)
 .omp/misroutes.jsonl
 .omp/model-decisions.json
+.omp/routing-state.json
 # the rotated generation — `*.log` does not match a `.log.1` suffix
 .profile-router-telemetry.log.1
