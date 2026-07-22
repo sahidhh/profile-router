@@ -2348,6 +2348,62 @@ describe("toolset restore: a profile restriction never outlives its matching tur
   });
 });
 
+describe("/profile off|on: routing kill switch", () => {
+  test("off pauses classification; prompts pass through untouched; on resumes", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "narrow", keywords: ["narrow-kw"], model: ["some/model"] })],
+      });
+      const { handlers, commands, statuses, setModelCalls, ctx } = await installExtension(dir);
+
+      // Baseline: a matching prompt classifies normally.
+      await handlers["before_agent_start"]!({ prompt: "narrow-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ narrow", "classifies while enabled");
+
+      // Turn it off.
+      await commands["profile"]!.handler("off", ctx);
+      assert.equal(statuses["profile"], "⏸ off", "off flips the status line immediately");
+      setModelCalls.length = 0;
+
+      // A prompt that WOULD match must now be ignored entirely.
+      const res = await handlers["before_agent_start"]!({ prompt: "narrow-kw here", systemPrompt: ["base"] }, ctx);
+      assert.equal(statuses["profile"], "⏸ off", "stays off across prompts");
+      assert.equal(setModelCalls.length, 0, "no model routing while off");
+      assert.equal(res, undefined, "no system-prompt injection while off");
+
+      // Turn it back on — routing resumes on the next prompt.
+      await commands["profile"]!.handler("on", ctx);
+      await handlers["before_agent_start"]!({ prompt: "narrow-kw here", systemPrompt: [] }, ctx);
+      assert.equal(statuses["profile"], "⚙ narrow", "on resumes classification");
+    });
+  });
+
+  test("off releases a restricted toolset immediately (lifts the lock)", async () => {
+    await withTempProjectDir(async (dir) => {
+      writeBundles(dir, {
+        profiles: [profile({ name: "narrow", keywords: ["narrow-kw"], tools: ["read", "grep"] })],
+      });
+      const { handlers, commands, setActiveToolsCalls, statuses, ctx } = await installExtension(dir);
+
+      await handlers["before_agent_start"]!({ prompt: "narrow-kw please look around", systemPrompt: [] }, ctx);
+      assert.deepEqual(setActiveToolsCalls[0], ["read", "grep"], "restriction applied");
+      assert.equal(statuses["profile"], "⚙ narrow 🔒", "locked");
+
+      await commands["profile"]!.handler("off", ctx);
+      assert.deepEqual(
+        setActiveToolsCalls[1],
+        ["read", "grep", "glob", "edit", "write", "bash"],
+        "off restores the pre-restriction baseline",
+      );
+      assert.equal(statuses["profile"], "⏸ off");
+
+      // Idempotent: a second off does not re-restore or double-fire.
+      await commands["profile"]!.handler("off", ctx);
+      assert.equal(setActiveToolsCalls.length, 2, "second off is a no-op on tools");
+    });
+  });
+});
+
 describe("/profile telemetry: routing-log summary", () => {
   test("no log file -> 'No telemetry recorded yet'", async () => {
     await withTempProjectDir(async (dir) => {

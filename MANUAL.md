@@ -388,6 +388,16 @@ On **every** prompt submission (`before_agent_start`):
   following prompt is classified normally with no manual suffix.
 - `/profile clear` — remove the pin (plain or `--once`) and resume automatic
   keyword classification on the next prompt.
+- `/profile off` / `/profile on` — session-scoped kill switch for the whole
+  router. While off, the `before_agent_start` handler returns early: no
+  classification, model routing, thinking-level or toolset change, rule
+  injection, or agent blocking — the turn runs as if the extension were absent.
+  `off` takes effect immediately (not just on the next prompt): it restores any
+  toolset the router had restricted, clears the active config so the `tool_call`
+  agent-block hook goes inert, and sets the status line to `⏸ off`. `on` resumes
+  routing on the following prompt. The flag never persists — every new session
+  starts on. Distinct from `/profile clear`, which only unpins and leaves
+  auto-classification running.
 - `/profile list` — list every profile loaded from `bundles.json` with its
   `description` (or, if none, its keywords), model, and thinking level. The
   quickest way to see what's available.
