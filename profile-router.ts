@@ -497,6 +497,35 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
+  // ---- Kill-switch persistence: /profile off|on survives sessions ----
+  // Stored as .omp/routing-state.json ({"enabled": bool}), project-local like the
+  // model-decisions file. Loaded lazily on the first prompt (or the first off/on
+  // command) so a session resumes in whatever state it was left; a decline to route
+  // must mean the same thing across restarts. Missing/malformed file → default on.
+  let persistedRoutingLoaded = false;
+  const routingStatePath = (cwd: string) => path.join(cwd, ".omp", "routing-state.json");
+
+  const loadPersistedRoutingState = (cwd: string) => {
+    if (persistedRoutingLoaded) return;
+    persistedRoutingLoaded = true;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(routingStatePath(cwd), "utf-8")) as Record<string, unknown>;
+      if (typeof parsed.enabled === "boolean") routingEnabled = parsed.enabled;
+    } catch {
+      // Missing or malformed file — keep the default (on); the next off/on rewrites it.
+    }
+  };
+
+  const persistRoutingState = (cwd: string) => {
+    persistedRoutingLoaded = true; // an explicit off/on is now the source of truth for this session
+    try {
+      fs.mkdirSync(path.join(cwd, ".omp"), { recursive: true });
+      fs.writeFileSync(routingStatePath(cwd), JSON.stringify({ enabled: routingEnabled }, null, 2) + "\n", "utf-8");
+    } catch (err) {
+      debugLog("routing-state persist failed", { error: (err as Error).message });
+    }
+  };
+
   /**
    * Log a telemetry entry for this routing decision to .profile-router-telemetry.log.
    * Appends one line per route.
@@ -564,6 +593,10 @@ export default function (pi: ExtensionAPI) {
   // ---- Every prompt: classify, merge, inject ----
   pi.on("before_agent_start", async (event, ctx) => {
     lastPrompt = event.prompt;
+
+    // Resume the kill switch from disk (once per session) so /profile off persists
+    // across restarts — a session left off comes back off, not silently re-routing.
+    loadPersistedRoutingState(ctx.cwd);
 
     // ---- Kill switch: /profile off pauses all routing ----
     // Model, thinking level, tools, and rules all pass through untouched — the turn
@@ -944,21 +977,24 @@ export default function (pi: ExtensionAPI) {
     // ---- /profile off : pause all routing (kill switch) ----
     // Idempotent. Tears down immediately — releases any restricted toolset, clears the
     // active config so the agent-block hook goes inert, and flips the status line to ⏸ —
-    // so the effect is visible now, not only on the next prompt.
+    // so the effect is visible now, not only on the next prompt. The state is persisted
+    // to .omp/routing-state.json so the switch survives a restart.
     off: async (_arg, _rest, _sub, ctx) => {
       routingEnabled = false;
+      persistRoutingState(ctx.cwd);
       if (baselineTools !== null) {
         await pi.setActiveTools(baselineTools);
         baselineTools = null;
       }
       active = null;
       ctx.ui.setStatus("profile", "⏸ off");
-      ctx.ui.notify("Profile routing OFF — prompts pass through untouched (model, tools, thinking, rules). /profile on to resume.", "info");
+      ctx.ui.notify("Profile routing OFF — prompts pass through untouched (model, tools, thinking, rules). Persists across sessions; /profile on to resume.", "info");
     },
 
     // ---- /profile on : resume routing ----
     on: (_arg, _rest, _sub, ctx) => {
       routingEnabled = true;
+      persistRoutingState(ctx.cwd);
       ctx.ui.notify("Profile routing ON — resumes on the next prompt.", "info");
     },
 

@@ -693,3 +693,32 @@ mechanism — it *recommends*, it does not *hide*. Revisit ONLY if a future OMP 
 splits the `<skills>` block into its own `systemPrompt[]` element or exposes a skills-restriction
 API; that is a version-bump trigger, tracked in `docs/omp-version-bump.md`. Evidence for these
 anchors is recorded in `API-FINDINGS.md` §(h).
+
+---
+
+## Phase 19 — `/profile off` kill switch persists across sessions (2026-07-22)
+
+**Change.** The routing kill switch (`/profile off` / `/profile on`) was session-scoped
+— it reset to on at the start of every session. It now persists: `off`/`on` write
+`{"enabled": bool}` to `.omp/routing-state.json`, and the state is reloaded once on the
+first prompt of each session (`loadPersistedRoutingState`, guarded by
+`persistedRoutingLoaded` so it runs at most once). A session left off comes back off
+after a restart, matching the user expectation that turning routing off is a durable
+choice, not one silently undone on reopen.
+
+**Decisions:**
+
+- **Project-local scope, not global.** Persisted to `.omp/routing-state.json` under
+  `ctx.cwd`, mirroring `.omp/model-decisions.json` exactly (same directory, same
+  lazy-load-once / write-on-change shape). The kill switch is a per-project working
+  decision; a global toggle would silence routing in unrelated repos.
+- **Gitignored.** Added `.omp/routing-state.json` to `.gitignore` alongside
+  `model-decisions.json` and `misroutes.jsonl` — it is per-user session state, not
+  shared config.
+- **Missing/malformed file defaults to on.** A `try/catch` that swallows read/parse
+  errors keeps the original default (routing enabled), so a corrupt or absent file can
+  never strand a project with routing silently off.
+- **Explicit off/on becomes the session's source of truth.** `persistRoutingState`
+  sets `persistedRoutingLoaded = true`, so a command issued before the first prompt is
+  not later clobbered by the lazy disk load (the load would read the same value anyway,
+  but marking it loaded avoids a redundant read and any future divergence).
